@@ -42,7 +42,8 @@ def _resolve_match(description: str) -> dict | None:
 def main():
     parser = argparse.ArgumentParser(description="Soccer Tracker")
     parser.add_argument("--source", default=VIDEO_SOURCE)
-    parser.add_argument("--match", default="", help="e.g. 'Bayern vs PSG 2024'")
+    parser.add_argument("--match", default="", help="e.g. 'Real Madrid vs Bayern Munich'")
+    parser.add_argument("--teams", default="", help="Explicit teams e.g. 'Real Madrid,FC Bayern München'")
     parser.add_argument("--output", default="stats_output.json")
     parser.add_argument("--record", action="store_true",
                         help="Save annotated video to output.mp4")
@@ -57,9 +58,19 @@ def main():
     jersey_lookup: dict[int, dict] = {}
     home_meta = away_meta = None
     identifier = None
+    _teams_arg: list[str] = []
+
+    if args.teams:
+        _teams_arg = [t.strip() for t in args.teams.split(",") if t.strip()]
 
     if args.match:
         match_data = _resolve_match(args.match)
+        if match_data and not _teams_arg:
+            # Extract team names from resolved match for teams_db lookup
+            home_name = match_data.get("home_team", {}).get("name", "")
+            away_name = match_data.get("away_team", {}).get("name", "")
+            if home_name and away_name:
+                _teams_arg = [home_name, away_name]
 
     if match_data:
         from match_resolver import build_jersey_lookup
@@ -105,6 +116,10 @@ def main():
 
     # ── New components ────────────────────────────────────────────────────────
     identity_mgr = PlayerIdentityManager()
+    if len(_teams_arg) >= 2:
+        identity_mgr.set_teams(_teams_arg[0], _teams_arg[1])
+    elif len(_teams_arg) == 1:
+        identity_mgr.set_team_label("A", _teams_arg[0])
     stats_tracker = PlayerStatsTracker(fps=int(native_fps))
     renderer = OverlayRenderer()
 
@@ -301,14 +316,13 @@ def main():
             renderer.draw_player_panel(frame, bbox, tid, identity, live_stats, team_color)
 
             # Accumulate sidebar data
-            fc26 = identity.get("fc26_stats") or {}
             sidebar_data.append({
                 "track_id": tid,
                 "name": identity.get("name") or player.player_name,
                 "jersey_number": identity.get("jersey_number") or player.jersey_number,
                 "team": team,
                 "team_color": team_color,
-                "overall": fc26.get("overall", 0),
+                "overall": identity.get("overall") or 0,
                 "avg_speed": stats_tracker.get_avg_speed(tid),
                 "top_speed": live_stats.top_speed_ms if live_stats else 0.0,
                 "distance": live_stats.distance_m if live_stats else 0.0,

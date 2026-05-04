@@ -79,7 +79,13 @@ class OverlayRenderer:
 
         jersey_number = identity.get("jersey_number")
         name = identity.get("name")
-        fc26 = identity.get("fc26_stats")
+        overall = identity.get("overall")
+        pac = identity.get("pace")
+        sho = identity.get("shooting")
+        pas = identity.get("passing")
+        dri = identity.get("dribbling")
+        def_ = identity.get("defending")
+        phy = identity.get("physical")
 
         # ── Build text lines ──────────────────────────────────────────
         if name:
@@ -90,7 +96,7 @@ class OverlayRenderer:
         else:
             id_part = f"#{track_id}"
 
-        ovr_str = f"  OVR {fc26['overall']}" if fc26 and fc26.get("overall") else ""
+        ovr_str = f"  OVR {overall}" if overall else ""
         line1 = f"{id_part}{ovr_str}"
 
         if live_stats:
@@ -103,14 +109,11 @@ class OverlayRenderer:
 
         lines = [line1, line2, line3]
 
-        if fc26:
-            pac = fc26.get("pace") or 0
-            sho = fc26.get("shooting") or 0
-            pas = fc26.get("passing") or 0
-            dri = fc26.get("dribbling") or 0
-            def_ = fc26.get("defending") or 0
-            phy = fc26.get("physical") or 0
-            line4 = f"PAC:{pac} SHO:{sho} PAS:{pas} DRI:{dri} DEF:{def_} PHY:{phy}"
+        if pac or sho or pas:
+            line4 = (
+                f"PAC:{pac or '--'} SHO:{sho or '--'} PAS:{pas or '--'} "
+                f"DRI:{dri or '--'} DEF:{def_ or '--'} PHY:{phy or '--'}"
+            )
             lines.append(line4)
 
         # ── Measure panel dimensions ──────────────────────────────────
