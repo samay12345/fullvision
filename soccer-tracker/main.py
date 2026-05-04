@@ -12,11 +12,14 @@ YOLO_EVERY_N_FRAMES = 3
 from tracker import PlayerRegistry, merge_player
 from team_classifier import TeamClassifier
 from stat_engine import StatEngine
-from overlay import Overlay, set_team_colors
+from overlay import Overlay, set_team_colors, _team_color as _overlay_team_color
 from youtube_input import is_youtube_url, get_stream_url
 from homography import PitchHomography
 from reid import ReIDTracker
 from formation import detect_formation
+from player_identity import PlayerIdentityManager
+from stats_tracker import PlayerStatsTracker
+from overlay_renderer import OverlayRenderer
 
 
 def _resolve_match(description: str) -> dict | None:
@@ -98,6 +101,13 @@ def main():
         print(f"Error: could not open video source '{source}'")
         return
 
+    native_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+
+    # ── New components ────────────────────────────────────────────────────────
+    identity_mgr = PlayerIdentityManager()
+    stats_tracker = PlayerStatsTracker(fps=int(native_fps))
+    renderer = OverlayRenderer()
+
     # ── Optional web dashboard ────────────────────────────────────────────────
     if args.web:
         import web_server
@@ -120,7 +130,6 @@ def main():
     paused = False
     speed = 1.0  # playback multiplier
 
-    native_fps = cap.get(cv2.CAP_PROP_FPS) or 30
     SEEK_SECONDS = 10  # how many seconds to jump per keypress
 
     # Track which IDs were active in the previous YOLO frame
@@ -162,6 +171,7 @@ def main():
 
         player_detections = []
         ball_pos = None
+        ball_bbox = None  # (x1,y1,x2,y2) for stats_tracker overlap check
 
         if run_yolo and results is not None and results.boxes is not None and results.boxes.id is not None:
             current_active_ids: set[int] = set()
@@ -238,6 +248,7 @@ def main():
 
                 elif class_id == BALL_CLASS_ID:
                     ball_pos = (cx, cy)
+                    ball_bbox = (x1, y1, x2, y2)
 
             # ── Mark disappeared IDs as lost ──────────────────────────────────
             disappeared_ids = prev_active_ids - current_active_ids
@@ -262,14 +273,55 @@ def main():
         for t in all_teams:
             formations[t] = detect_formation(active, t, fh)
 
-        # ── Draw detections ───────────────────────────────────────────────────
+        # ── Draw detections with new renderer ────────────────────────────────
+        sidebar_data: list[dict] = []
+
         for det in player_detections:
             tid = det["tracker_id"]
+            bbox = det["bbox"]
+            team = det["team"]
             player = registry.get_or_create(tid)
-            stats = player.to_dict()
-            frame = overlay.draw_player(frame, det["bbox"], tid, player.team, stats)
+            cx, cy = det["center"]
 
+            # Determine team color for this player
+            team_color = _overlay_team_color(team)
+
+            # Get speed from existing PlayerTracker (already computed there)
+            speed_ms = player.get_average_speed()
+
+            # Update new stats tracker
+            stats_tracker.update(tid, cx, cy, speed_ms, bbox, ball_bbox)
+            live_stats = stats_tracker.get_stats(tid)
+
+            # Get identity via OCR + roster lookup
+            identity = identity_mgr.get_identity(tid, frame, bbox, team)
+
+            # Draw bounding box and panel using new renderer
+            renderer.draw_bounding_box(frame, bbox, team_color)
+            renderer.draw_player_panel(frame, bbox, tid, identity, live_stats, team_color)
+
+            # Accumulate sidebar data
+            fc26 = identity.get("fc26_stats") or {}
+            sidebar_data.append({
+                "track_id": tid,
+                "name": identity.get("name") or player.player_name,
+                "jersey_number": identity.get("jersey_number") or player.jersey_number,
+                "team": team,
+                "team_color": team_color,
+                "overall": fc26.get("overall", 0),
+                "avg_speed": stats_tracker.get_avg_speed(tid),
+                "top_speed": live_stats.top_speed_ms if live_stats else 0.0,
+                "distance": live_stats.distance_m if live_stats else 0.0,
+                "sprints": live_stats.sprint_count if live_stats else 0,
+            })
+
+        # ── Sidebar HUD ───────────────────────────────────────────────────────
+        renderer.draw_sidebar(frame, sidebar_data, fw, fh)
+
+        # ── Ball ──────────────────────────────────────────────────────────────
         if ball_pos:
+            renderer.draw_ball_indicator(frame, ball_pos)
+            # Also keep legacy ball drawing for compatibility
             frame = overlay.draw_ball(frame, ball_pos)
 
         # ── Possession & pass network overlays ───────────────────────────────
