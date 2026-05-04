@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pt
+*.mp4
+*.json
+match_report.txt
+assets/
