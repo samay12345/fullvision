@@ -327,32 +327,33 @@ class Overlay:
         if not pass_events:
             return frame
 
+        # Single overlay for all pass lines — one blend instead of one per pass
+        line_layer = frame.copy()
+        drew_any = False
+
         for event in pass_events:
             age = current_frame - event.get("frame", current_frame)
             if age > fade_frames:
                 continue
             alpha = 1.0 - (age / fade_frames)
-            if alpha <= 0:
+            if alpha <= 0.05:
                 continue
 
             from_pos = event.get("from_pos")
             to_pos = event.get("to_pos")
-            team = event.get("team")
-
             if from_pos is None or to_pos is None:
                 continue
 
-            color = _team_color(team)
+            color = _team_color(event.get("team"))
             pt1 = (int(from_pos[0]), int(from_pos[1]))
             pt2 = (int(to_pos[0]), int(to_pos[1]))
 
-            # Draw line onto a copy and blend
-            line_layer = frame.copy()
             cv2.line(line_layer, pt1, pt2, color, 2, cv2.LINE_AA)
-            cv2.addWeighted(line_layer, alpha * 0.6, frame, 1 - alpha * 0.6, 0, frame)
+            cv2.circle(line_layer, pt2, 4, color, -1)
+            drew_any = True
 
-            # Draw endpoint circles
-            cv2.circle(frame, pt2, 4, color, -1)
+        if drew_any:
+            cv2.addWeighted(line_layer, 0.55, frame, 0.45, 0, frame)
 
         return frame
 

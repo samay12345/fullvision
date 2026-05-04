@@ -41,8 +41,8 @@ class PlayerStatsTracker:
         self,
         fps: int = 30,
         pixels_per_meter: float = 10.0,
-        sprint_speed_ms: float = 7.0,
-        sprint_frames_required: int = 10,
+        sprint_speed_ms: float = 4.0,
+        sprint_frames_required: int = 5,
     ):
         self.fps = fps
         self.pixels_per_meter = pixels_per_meter

@@ -6,6 +6,7 @@ from config import (
     VIDEO_SOURCE, CONFIDENCE_THRESHOLD, IOU_THRESHOLD,
     TRACKER, YOLO_MODEL, PERSON_CLASS_ID, BALL_CLASS_ID,
     FRAME_WIDTH, FRAME_HEIGHT, RECORD_FPS, WEB_PORT,
+    TEAM_A_COLOR, TEAM_B_COLOR,
 )
 
 YOLO_EVERY_N_FRAMES = 3
@@ -117,7 +118,21 @@ def main():
     # ── New components ────────────────────────────────────────────────────────
     identity_mgr = PlayerIdentityManager()
     if len(_teams_arg) >= 2:
-        identity_mgr.set_teams(_teams_arg[0], _teams_arg[1])
+        home_key, away_key = identity_mgr.set_teams(_teams_arg[0], _teams_arg[1])
+        # Set team colors from kit table when --match wasn't used
+        if not match_data:
+            from config import TEAM_KIT_COLORS_BGR
+            def _kit(name):
+                if name is None:
+                    return None
+                return TEAM_KIT_COLORS_BGR.get(name.lower())
+            home_color = _kit(home_key) or TEAM_A_COLOR
+            away_color = _kit(away_key) or TEAM_B_COLOR
+            set_team_colors(
+                home_key or _teams_arg[0], home_color,
+                away_key or _teams_arg[1], away_color,
+            )
+            overlay.match_info = f"{(_teams_arg[0].split()[-1]).upper()} vs {(_teams_arg[1].split()[-1]).upper()}"
     elif len(_teams_arg) == 1:
         identity_mgr.set_team_label("A", _teams_arg[0])
     stats_tracker = PlayerStatsTracker(fps=int(native_fps))
@@ -143,12 +158,14 @@ def main():
     fps_t = time.time()
     fps_display = 0.0
     paused = False
-    speed = 1.0  # playback multiplier
+    speed = 1.0
 
-    SEEK_SECONDS = 10  # how many seconds to jump per keypress
+    SEEK_SECONDS = 10
+    FORMATION_UPDATE_EVERY = 30   # recompute formations every N frames
 
-    # Track which IDs were active in the previous YOLO frame
     prev_active_ids: set[int] = set()
+    cached_formations: dict[str, str] = {}
+    cached_active: list = []
 
     # ── Calibrate homography on first frame ───────────────────────────────────
     first_frame_grabbed = False
@@ -280,15 +297,18 @@ def main():
         if run_yolo:
             stat_engine.update(player_detections, ball_pos, frame_num)
 
-        # ── Compute formations ────────────────────────────────────────────────
         fh, fw = frame.shape[:2]
-        active = registry.active_players(frame_num)
-        all_teams = {p.team for p in active if p.team and p.team != "unknown"}
-        formations: dict[str, str] = {}
-        for t in all_teams:
-            formations[t] = detect_formation(active, t, fh)
 
-        # ── Draw detections with new renderer ────────────────────────────────
+        # ── Formations (cached, recomputed every N frames) ────────────────────
+        if frame_num % FORMATION_UPDATE_EVERY == 0:
+            cached_active = registry.active_players(frame_num)
+            all_teams = {p.team for p in cached_active if p.team and p.team != "unknown"}
+            cached_formations = {t: detect_formation(cached_active, t, fh) for t in all_teams}
+        active = cached_active
+        formations = cached_formations
+
+        # ── Draw detections — batch renderer ─────────────────────────────────
+        renderer.begin_frame(frame)
         sidebar_data: list[dict] = []
 
         for det in player_detections:
@@ -298,24 +318,18 @@ def main():
             player = registry.get_or_create(tid)
             cx, cy = det["center"]
 
-            # Determine team color for this player
             team_color = _overlay_team_color(team)
-
-            # Get speed from existing PlayerTracker (already computed there)
             speed_ms = player.get_average_speed()
 
-            # Update new stats tracker
             stats_tracker.update(tid, cx, cy, speed_ms, bbox, ball_bbox)
             live_stats = stats_tracker.get_stats(tid)
 
-            # Get identity via OCR + roster lookup
-            identity = identity_mgr.get_identity(tid, frame, bbox, team)
+            # OCR throttled — passes frame_num so it knows when to retry
+            identity = identity_mgr.get_identity(tid, frame, bbox, team, frame_num)
 
-            # Draw bounding box and panel using new renderer
-            renderer.draw_bounding_box(frame, bbox, team_color)
+            # Queue panel into batch (no copy yet)
             renderer.draw_player_panel(frame, bbox, tid, identity, live_stats, team_color)
 
-            # Accumulate sidebar data
             sidebar_data.append({
                 "track_id": tid,
                 "name": identity.get("name") or player.player_name,
@@ -329,14 +343,15 @@ def main():
                 "sprints": live_stats.sprint_count if live_stats else 0,
             })
 
+        # Single blend for all player panels
+        renderer.flush(frame)
+
         # ── Sidebar HUD ───────────────────────────────────────────────────────
         renderer.draw_sidebar(frame, sidebar_data, fw, fh)
 
         # ── Ball ──────────────────────────────────────────────────────────────
         if ball_pos:
             renderer.draw_ball_indicator(frame, ball_pos)
-            # Also keep legacy ball drawing for compatibility
-            frame = overlay.draw_ball(frame, ball_pos)
 
         # ── Possession & pass network overlays ───────────────────────────────
         possession_pct = stat_engine.get_possession_pct()

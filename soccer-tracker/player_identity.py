@@ -124,10 +124,13 @@ class PlayerIdentityManager:
     def __init__(self):
         self._reader = None
         self._id_cache: dict[int, dict] = {}
-        # team_label -> {jersey_int -> player_dict}
         self._rosters: dict[str, dict[int, dict]] = {}
-        # Fallback: load legacy player_roster.json
         self._legacy_roster: dict = {}
+        # OCR throttle: track attempts and last-tried frame per player
+        self._ocr_attempts: dict[int, int] = {}
+        self._ocr_last_frame: dict[int, int] = {}
+        self._OCR_RETRY_FRAMES = 45   # try OCR at most once every 45 frames
+        self._OCR_MAX_ATTEMPTS = 6    # give up after 6 failed OCR attempts
         self._load_legacy_roster()
 
     # ------------------------------------------------------------------
@@ -254,12 +257,27 @@ class PlayerIdentityManager:
         frame: np.ndarray,
         bbox: tuple,
         team_label: str,
+        frame_num: int = 0,
     ) -> dict:
         cached = self._id_cache.get(track_id)
         if cached and cached.get("jersey_number") is not None:
             return cached
 
-        jersey = self.read_jersey_number(frame, bbox)
+        # Throttle OCR: skip if we've exceeded attempt limit or tried too recently
+        attempts = self._ocr_attempts.get(track_id, 0)
+        last_tried = self._ocr_last_frame.get(track_id, -9999)
+        should_ocr = (
+            attempts < self._OCR_MAX_ATTEMPTS
+            and (frame_num - last_tried) >= self._OCR_RETRY_FRAMES
+        )
+
+        jersey = None
+        if should_ocr:
+            self._ocr_last_frame[track_id] = frame_num
+            jersey = self.read_jersey_number(frame, bbox)
+            if jersey is None:
+                self._ocr_attempts[track_id] = attempts + 1
+
         player_dict = None
         if jersey is not None:
             player_dict = self._lookup(jersey, team_label)
