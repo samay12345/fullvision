@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Football Live Tracker</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f0f0f;
+    --sidebar-bg: #1a1a1a;
+    --bar-bg: #141414;
+    --border: #2a2a2a;
+    --accent: #3b82f6;
+    --text: #e0e0e0;
+    --muted: #888;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --team-a: #3b82f6;
+    --team-b: #ef4444;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 14px;
+    overflow: hidden;
+  }
+
+  /* ── Layout ─────────────────────────────────────────────────────── */
+
+  #app {
+    display: grid;
+    grid-template-rows: 1fr auto;
+    grid-template-columns: 1fr 280px;
+    height: 100vh;
+    gap: 0;
+  }
+
+  #video-cell {
+    grid-row: 1;
+    grid-column: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    overflow: hidden;
+    position: relative;
+  }
+
+  #feed {
+    max-width: 100%;
+    max-height: 100%;
+    display: block;
+    object-fit: contain;
+  }
+
+  #sidebar {
+    grid-row: 1;
+    grid-column: 2;
+    background: var(--sidebar-bg);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  #status-bar {
+    grid-row: 2;
+    grid-column: 1 / 3;
+    background: var(--bar-bg);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 14px;
+    flex-wrap: wrap;
+    min-height: 50px;
+  }
+
+  /* ── Sidebar ─────────────────────────────────────────────────────── */
+
+  .sidebar-header {
+    padding: 10px 12px 6px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+
+  .team-tabs {
+    display: flex;
+    gap: 6px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .team-tab {
+    flex: 1;
+    padding: 4px 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.15s;
+  }
+
+  .team-tab.active-a, .team-tab:hover { color: var(--text); }
+  .team-tab.active-a { background: #1e3a5f; border-color: var(--team-a); color: var(--team-a); }
+  .team-tab.active-b { background: #3f1212; border-color: var(--team-b); color: var(--team-b); }
+
+  #player-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+
+  #player-list::-webkit-scrollbar { width: 4px; }
+  #player-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .player-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+    transition: background 0.12s, border-color 0.12s;
+    font-size: 12px;
+  }
+
+  .player-row:hover { background: #232323; }
+  .player-row.highlighted { background: #1e2a3a; border-left-color: var(--accent); }
+
+  .player-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .player-name {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: 500;
+  }
+
+  .player-ovr {
+    color: var(--muted);
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+
+  .player-rating {
+    font-weight: 700;
+    font-size: 13px;
+    flex-shrink: 0;
+    min-width: 36px;
+    text-align: right;
+    transition: color 0.3s ease;
+  }
+
+  .rating-green { color: var(--green); }
+  .rating-yellow { color: var(--yellow); }
+  .rating-red { color: var(--red); }
+
+  .player-delta {
+    font-size: 10px;
+    flex-shrink: 0;
+    min-width: 30px;
+    text-align: right;
+  }
+
+  .delta-up { color: var(--green); }
+  .delta-down { color: var(--red); }
+  .delta-same { color: var(--muted); }
+
+  /* ── Status bar ──────────────────────────────────────────────────── */
+
+  .conn-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    transition: background 0.3s;
+  }
+  .conn-dot.connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .conn-dot.disconnected { background: var(--red); }
+
+  #url-input {
+    flex: 1;
+    min-width: 200px;
+    background: #222;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text);
+    font-size: 12px;
+    padding: 5px 10px;
+    outline: none;
+  }
+  #url-input:focus { border-color: var(--accent); }
+
+  .btn {
+    padding: 5px 14px;
+    border-radius: 5px;
+    border: none;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s, background 0.15s;
+    white-space: nowrap;
+  }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: #2563eb; }
+  .btn-danger { background: #7f1d1d; color: #fca5a5; border: 1px solid var(--red); }
+  .btn-danger:hover:not(:disabled) { background: #991b1b; }
+
+  #status-text {
+    color: var(--muted);
+    font-size: 11px;
+    flex: 1 1 100%;
+    line-height: 1;
+  }
+
+  /* ── Toast ───────────────────────────────────────────────────────── */
+
+  #toast {
+    position: fixed;
+    bottom: 70px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: #7f1d1d;
+    border: 1px solid var(--red);
+    color: #fca5a5;
+    padding: 8px 18px;
+    border-radius: 6px;
+    font-size: 12px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s, transform 0.25s;
+    z-index: 999;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ── Spinner ─────────────────────────────────────────────────────── */
+
+  .spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 4px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Responsive ──────────────────────────────────────────────────── */
+
+  @media (max-width: 640px) {
+    #app { grid-template-columns: 1fr; grid-template-rows: 1fr 220px auto; }
+    #video-cell { grid-row: 1; grid-column: 1; }
+    #sidebar { grid-row: 2; grid-column: 1; border-left: none; border-top: 1px solid var(--border); }
+    #status-bar { grid-row: 3; grid-column: 1; }
+  }
+
+  /* ── No-signal placeholder ───────────────────────────────────────── */
+
+  #no-signal {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: #444;
+    font-size: 14px;
+    pointer-events: none;
+  }
+  #no-signal svg { opacity: 0.25; }
+  #no-signal.hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Video -->
+  <div id="video-cell">
+    <canvas id="feed"></canvas>
+    <div id="no-signal">
+      <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+      </svg>
+      <span id="no-signal-text">Paste a YouTube URL and click Analyze</span>
+    </div>
+  </div>
+
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <div class="sidebar-header">Live Ratings</div>
+    <div class="team-tabs">
+      <button class="team-tab active-a" id="tab-all" onclick="filterTeam('all')">All</button>
+      <button class="team-tab" id="tab-a" onclick="filterTeam('A')" style="color:var(--team-a)">Team A</button>
+      <button class="team-tab" id="tab-b" onclick="filterTeam('B')" style="color:var(--team-b)">Team B</button>
+    </div>
+    <div id="player-list">
+      <div style="text-align:center;color:var(--muted);padding:24px;font-size:12px">Waiting for data…</div>
+    </div>
+  </div>
+
+  <!-- Status bar -->
+  <div id="status-bar">
+    <div class="conn-dot disconnected" id="conn-dot"></div>
+    <span id="conn-label" style="font-size:11px;color:var(--muted)">DISCONNECTED</span>
+    <input id="url-input" type="text" placeholder="https://www.youtube.com/watch?v=..." />
+    <button class="btn btn-primary" id="analyze-btn" onclick="startAnalysis()">▶ Analyze</button>
+    <button class="btn btn-danger" id="stop-btn" onclick="stopAnalysis()" style="display:none">■ Stop</button>
+    <div id="status-text">Ready</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+
+let ws = null;
+let wsRetryTimeout = null;
+let latestPlayers = [];
+let highlightedTrackId = null;
+let teamFilter = 'all';
+let lastFrameTs = 0;
+let fpsSamples = [];
+const canvas = document.getElementById('feed');
+const ctx = canvas.getContext('2d');
+const noSignal = document.getElementById('no-signal');
+const noSignalText = document.getElementById('no-signal-text');
+
+// ── WebSocket ────────────────────────────────────────────────────────────────
+
+function connectWS() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/feed`);
+
+  ws.onopen = () => {
+    setConnected(true);
+    if (wsRetryTimeout) { clearTimeout(wsRetryTimeout); wsRetryTimeout = null; }
+  };
+
+  ws.onclose = () => {
+    setConnected(false);
+    scheduleReconnect();
+  };
+
+  ws.onerror = () => {
+    setConnected(false);
+    ws.close();
+  };
+
+  ws.onmessage = (evt) => {
+    let data;
+    try { data = JSON.parse(evt.data); } catch { return; }
+    if (data.ping) return;
+    handleFrame(data);
+  };
+}
+
+function scheduleReconnect() {
+  if (wsRetryTimeout) return;
+  wsRetryTimeout = setTimeout(() => {
+    wsRetryTimeout = null;
+    connectWS();
+  }, 3000);
+}
+
+function setConnected(yes) {
+  const dot = document.getElementById('conn-dot');
+  const lbl = document.getElementById('conn-label');
+  dot.className = 'conn-dot ' + (yes ? 'connected' : 'disconnected');
+  lbl.textContent = yes ? 'CONNECTED' : 'DISCONNECTED';
+  lbl.style.color = yes ? 'var(--green)' : 'var(--muted)';
+}
+
+// ── Frame handling ───────────────────────────────────────────────────────────
+
+function handleFrame(data) {
+  // Decode and draw frame
+  if (data.frame_b64) {
+    const img = new Image();
+    img.onload = () => {
+      // Maintain aspect ratio
+      const containerW = canvas.parentElement.clientWidth;
+      const containerH = canvas.parentElement.clientHeight;
+      const imgRatio = img.width / img.height;
+      const containerRatio = containerW / containerH;
+      let drawW, drawH;
+      if (imgRatio > containerRatio) {
+        drawW = containerW; drawH = containerW / imgRatio;
+      } else {
+        drawH = containerH; drawW = containerH * imgRatio;
+      }
+      canvas.width = drawW;
+      canvas.height = drawH;
+      ctx.drawImage(img, 0, 0, drawW, drawH);
+
+      // Draw highlighted player border if needed
+      if (highlightedTrackId !== null && data.players) {
+        const pl = data.players.find(p => p.track_id === highlightedTrackId);
+        if (pl && pl.bbox) {
+          const scaleX = drawW / img.width;
+          const scaleY = drawH / img.height;
+          const [bx, by, bw, bh] = pl.bbox;
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 4;
+          ctx.strokeRect(bx * scaleX, by * scaleY, bw * scaleX, bh * scaleY);
+        }
+      }
+
+      noSignal.classList.add('hidden');
+    };
+    img.src = 'data:image/jpeg;base64,' + data.frame_b64;
+  }
+
+  // Update player list
+  if (data.players !== undefined) {
+    latestPlayers = data.players;
+    renderPlayerList();
+  }
+
+  // FPS estimate
+  const now = performance.now();
+  if (lastFrameTs > 0) {
+    fpsSamples.push(1000 / (now - lastFrameTs));
+    if (fpsSamples.length > 20) fpsSamples.shift();
+  }
+  lastFrameTs = now;
+  const fps = fpsSamples.length > 1
+    ? (fpsSamples.reduce((a,b) => a+b, 0) / fpsSamples.length).toFixed(1)
+    : '–';
+
+  // Update status text
+  const frameId = data.frame_id || 0;
+  const playerCount = (data.players || []).length;
+  document.getElementById('status-text').textContent =
+    `Analyzing frame ${frameId} · ${playerCount} players on pitch · ${fps} FPS`;
+}
+
+// ── Player list rendering ────────────────────────────────────────────────────
+
+function filterTeam(team) {
+  teamFilter = team;
+  ['all','a','b'].forEach(t => {
+    const tab = document.getElementById('tab-' + t);
+    if (tab) {
+      tab.className = 'team-tab';
+      if (t.toUpperCase() === team || (t === 'all' && team === 'all')) {
+        tab.className += (team === 'A') ? ' active-a' : (team === 'B') ? ' active-b' : ' active-a';
+      }
+    }
+  });
+  renderPlayerList();
+}
+
+function ratingClass(r) {
+  if (r >= 7.5) return 'rating-green';
+  if (r >= 6.0) return 'rating-yellow';
+  return 'rating-red';
+}
+
+function deltaStr(d) {
+  if (d > 0.001) return `<span class="delta-up">↑+${d.toFixed(2)}</span>`;
+  if (d < -0.001) return `<span class="delta-down">↓${d.toFixed(2)}</span>`;
+  return `<span class="delta-same">→</span>`;
+}
+
+function renderPlayerList() {
+  const list = document.getElementById('player-list');
+  let players = latestPlayers.slice();
+
+  // Filter by team
+  if (teamFilter !== 'all') {
+    players = players.filter(p => p.team === teamFilter);
+  }
+
+  // Sort by rating descending
+  players.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+
+  if (players.length === 0) {
+    list.innerHTML = '<div style="text-align:center;color:var(--muted);padding:24px;font-size:12px">No players detected</div>';
+    return;
+  }
+
+  const rows = players.map(p => {
+    const dotColor = p.team === 'A' ? 'var(--team-a)' : p.team === 'B' ? 'var(--team-b)' : '#888';
+    const name = p.name ? p.name.split(' ').pop() : (p.jersey ? `#${p.jersey}` : `#${p.track_id}`);
+    const fullLabel = p.jersey ? `#${p.jersey} ${name}` : name;
+    const ovr = (p.fc26 && p.fc26.overall) ? `OVR${p.fc26.overall}` : '';
+    const r = p.rating || 6.5;
+    const rc = ratingClass(r);
+    const highlighted = p.track_id === highlightedTrackId ? ' highlighted' : '';
+
+    return `<div class="player-row${highlighted}" onclick="selectPlayer(${p.track_id})">
+      <div class="player-dot" style="background:${dotColor}"></div>
+      <div class="player-name" title="${p.name || ''}">${fullLabel}</div>
+      <div class="player-ovr">${ovr}</div>
+      <div class="player-rating ${rc}">★${r.toFixed(1)}</div>
+      <div class="player-delta">${deltaStr(p.rating_delta || 0)}</div>
+    </div>`;
+  }).join('');
+
+  list.innerHTML = rows;
+}
+
+function selectPlayer(trackId) {
+  if (highlightedTrackId === trackId) {
+    highlightedTrackId = null;
+  } else {
+    highlightedTrackId = trackId;
+  }
+  renderPlayerList();
+}
+
+// ── Analysis controls ────────────────────────────────────────────────────────
+
+async function startAnalysis() {
+  const url = document.getElementById('url-input').value.trim();
+  if (!url) { showToast('Please enter a YouTube URL'); return; }
+
+  const btn = document.getElementById('analyze-btn');
+  const stopBtn = document.getElementById('stop-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Starting…';
+  noSignal.classList.remove('hidden');
+  noSignalText.textContent = 'Starting pipeline…';
+
+  try {
+    const resp = await fetch('/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await resp.json();
+
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `HTTP ${resp.status}`);
+    }
+
+    btn.style.display = 'none';
+    stopBtn.style.display = '';
+    noSignalText.textContent = 'Loading stream…';
+    document.getElementById('status-text').textContent = 'Pipeline started, waiting for frames…';
+
+    // Poll status until running or error
+    pollStatus();
+
+  } catch (err) {
+    showToast('Error: ' + (err.message || 'Unknown error'));
+    btn.disabled = false;
+    btn.innerHTML = '▶ Analyze';
+  }
+}
+
+async function pollStatus() {
+  const btn = document.getElementById('analyze-btn');
+  const stopBtn = document.getElementById('stop-btn');
+
+  for (let i = 0; i < 60; i++) {
+    await sleep(1000);
+    try {
+      const resp = await fetch('/status');
+      const s = await resp.json();
+      if (s.state === 'error') {
+        showToast('Pipeline error: ' + (s.error || 'unknown'));
+        stopBtn.style.display = 'none';
+        btn.style.display = '';
+        btn.disabled = false;
+        btn.innerHTML = '▶ Analyze';
+        noSignal.classList.remove('hidden');
+        noSignalText.textContent = 'Error: ' + (s.error || 'unknown');
+        return;
+      }
+      if (s.state === 'running') return;
+    } catch { /* ignore */ }
+  }
+}
+
+async function stopAnalysis() {
+  const btn = document.getElementById('analyze-btn');
+  const stopBtn = document.getElementById('stop-btn');
+  stopBtn.disabled = true;
+
+  try {
+    await fetch('/stop', { method: 'POST' });
+  } catch { /* ignore */ }
+
+  stopBtn.style.display = 'none';
+  stopBtn.disabled = false;
+  btn.style.display = '';
+  btn.disabled = false;
+  btn.innerHTML = '▶ Analyze';
+  document.getElementById('status-text').textContent = 'Stopped.';
+  noSignal.classList.remove('hidden');
+  noSignalText.textContent = 'Paste a YouTube URL and click Analyze';
+  latestPlayers = [];
+  renderPlayerList();
+}
+
+// ── Utilities ────────────────────────────────────────────────────────────────
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 4000);
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+
+connectWS();
+
+// Periodically check pipeline status for error recovery
+setInterval(async () => {
+  if (document.getElementById('stop-btn').style.display === 'none') return;
+  try {
+    const resp = await fetch('/status');
+    const s = await resp.json();
+    if (s.state === 'error') {
+      showToast('Pipeline error: ' + (s.error || 'stream ended'));
+      document.getElementById('stop-btn').style.display = 'none';
+      const btn = document.getElementById('analyze-btn');
+      btn.style.display = '';
+      btn.disabled = false;
+      btn.innerHTML = '▶ Analyze';
+    }
+  } catch { /* ignore */ }
+}, 5000);
+</script>
+</body>
+</html>

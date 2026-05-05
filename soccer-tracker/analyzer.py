@@ -1,0 +1,522 @@
+"""
+analyzer.py — Core analysis pipeline.
+
+Consumes frames from frame_queue, runs YOLO + ByteTrack, classifies teams,
+runs OCR for jersey numbers, builds per-player stats, annotates frames,
+and pushes JSON payloads to broadcast_queue.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import math
+import queue
+import threading
+import time
+from typing import Any
+
+import cv2
+import numpy as np
+
+from config import (
+    CONFIDENCE_THRESHOLD,
+    IOU_THRESHOLD,
+    TRACKER,
+    YOLO_MODEL,
+    PERSON_CLASS_ID,
+    BALL_CLASS_ID,
+    SPEED_SCALE_FACTOR,
+)
+from tracker import PlayerRegistry, PlayerTracker, merge_player
+from team_classifier import TeamClassifier
+from stat_engine import StatEngine
+from player_identity import PlayerIdentityManager
+from reid import ReIDTracker
+from stats_tracker import PlayerStatsTracker
+from rating_engine import RatingEngine, EventDetector
+from fc26_loader import FC26Loader
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+YOLO_EVERY_N = 3           # run YOLO every N frames
+TEAM_A_COLOR_BGR = (255, 80, 40)    # blue
+TEAM_B_COLOR_BGR = (40, 40, 220)    # red
+UNKNOWN_COLOR_BGR = (160, 160, 160)
+FONT = cv2.FONT_HERSHEY_SIMPLEX
+MIN_PANEL_H = 30            # skip text panel for tiny bboxes
+PIXELS_PER_METER = 10.0
+RATING_DECAY_INTERVAL_S = 5.0
+
+
+def _team_color(team: str | None) -> tuple[int, int, int]:
+    if team == "A":
+        return TEAM_A_COLOR_BGR
+    if team == "B":
+        return TEAM_B_COLOR_BGR
+    return UNKNOWN_COLOR_BGR
+
+
+def _rating_color(rating: float) -> tuple[int, int, int]:
+    """BGR color for rating value."""
+    if rating >= 7.5:
+        return (80, 200, 80)   # green
+    if rating >= 6.0:
+        return (40, 190, 220)  # yellow (BGR)
+    return (50, 50, 210)       # red
+
+
+class Analyzer:
+    """
+    Processes frames from *frame_queue* and pushes WS payloads to
+    *broadcast_queue* (an asyncio.Queue in the server event loop).
+
+    All heavy work runs in the calling thread (a ThreadPoolExecutor worker).
+    """
+
+    def __init__(
+        self,
+        frame_queue: "queue.Queue[np.ndarray]",
+        broadcast_queue: asyncio.Queue,
+        fps: float,
+        loop: asyncio.AbstractEventLoop,
+    ):
+        self._frame_queue = frame_queue
+        self._broadcast_queue = broadcast_queue
+        self._fps = max(fps, 1.0)
+        self._loop = loop
+        self._stop_event = threading.Event()
+
+        # ── Tracking components ───────────────────────────────────────────────
+        self._registry = PlayerRegistry()
+        self._classifier = TeamClassifier()
+        self._stat_engine = StatEngine(self._registry)
+        self._identity_mgr = PlayerIdentityManager()
+        self._reid = ReIDTracker()
+        self._stats_tracker = PlayerStatsTracker(fps=int(self._fps), pixels_per_meter=PIXELS_PER_METER)
+        self._rating_engine = RatingEngine()
+        self._event_detector = EventDetector()
+        self._fc26 = FC26Loader()
+
+        # ── YOLO model (lazy load on first frame) ────────────────────────────
+        self._model = None
+
+        # ── State ────────────────────────────────────────────────────────────
+        self._frame_num = 0
+        self._last_player_detections: list[dict] = []
+        self._last_ball_pos: tuple[int, int] | None = None
+        self._prev_active_ids: set[int] = set()
+        self._start_time = time.monotonic()
+        self._last_decay_ts = 0.0
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _load_model(self):
+        if self._model is None:
+            from ultralytics import YOLO
+            self._model = YOLO(YOLO_MODEL)
+        return self._model
+
+    def _timestamp_s(self) -> float:
+        return (self._frame_num / self._fps)
+
+    def _push(self, payload: dict) -> None:
+        """Thread-safely enqueue payload to the async broadcast queue."""
+        async def _put():
+            # If queue is at capacity, drop the oldest
+            if self._broadcast_queue.full():
+                try:
+                    self._broadcast_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                self._broadcast_queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass  # drop this frame
+
+        asyncio.run_coroutine_threadsafe(_put(), self._loop)
+
+    # ------------------------------------------------------------------
+    # Frame annotation
+    # ------------------------------------------------------------------
+
+    def _draw_frame(
+        self,
+        frame: np.ndarray,
+        player_detections: list[dict],
+        ball_pos: tuple | None,
+        highlighted_id: int | None = None,
+    ) -> np.ndarray:
+        """Draw all overlays onto frame in-place (no per-player copy)."""
+
+        # Collect all background rects and labels first, blend once
+        overlay_layer = np.zeros_like(frame)
+        texts: list[dict] = []
+        borders: list[dict] = []
+
+        for det in player_detections:
+            tid = det["tracker_id"]
+            x1, y1, x2, y2 = map(int, det["bbox"])
+            team = det.get("team") or "unknown"
+            color = _team_color(team)
+
+            player = self._registry.players.get(tid)
+            identity = self._identity_mgr.get_cached_identity(tid) or {}
+            live_stats = self._stats_tracker.get_stats(tid)
+            rating = self._rating_engine.get_rating(tid)
+
+            # ── Header label: #10 Mbappe [★7.6↑] ────────────────────────────
+            name = identity.get("name") or (player.player_name if player else None)
+            jersey = identity.get("jersey_number") or (player.jersey_number if player else None)
+            delta = self._rating_engine.get_delta(tid)
+            arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
+            if name:
+                surname = name.split()[-1]
+                id_part = f"#{jersey} {surname}" if jersey else surname
+            elif jersey:
+                id_part = f"#{jersey}"
+            else:
+                id_part = f"#{tid}"
+            star_str = f"[★{rating:.1f}{arrow}]"
+            top_label = f"{id_part}  {star_str}"
+
+            # ── Bottom label: speed · distance · sprints ──────────────────
+            if live_stats:
+                spd = live_stats.speed_history[-1] if live_stats.speed_history else 0.0
+                dist = live_stats.distance_m
+                spr = live_stats.sprint_count
+                bot_label = f"{spd:.1f}m/s · {dist:.0f}m · {spr}spr"
+            else:
+                bot_label = "0.0m/s · 0m · 0spr"
+
+            bbox_h = y2 - y1
+            if bbox_h >= MIN_PANEL_H:
+                font_scale = max(0.27, min(0.38, bbox_h / 300.0))
+                thick = 1
+
+                # Measure label widths
+                (tw1, th1), _ = cv2.getTextSize(top_label, FONT, font_scale, thick)
+                (tw2, _), _ = cv2.getTextSize(bot_label, FONT, font_scale, thick)
+                panel_w = max(tw1, tw2) + 8
+                panel_h = (th1 + 4) * 2 + 6
+
+                fh_frame, fw_frame = frame.shape[:2]
+                px = max(0, min(x1, fw_frame - panel_w))
+                py = y1 - panel_h - 3
+                if py < 0:
+                    py = y2 + 3
+                py = max(0, min(py, fh_frame - panel_h))
+
+                # Background rect into overlay layer
+                cv2.rectangle(overlay_layer, (px, py), (px + panel_w, py + panel_h), (20, 20, 20), -1)
+
+                rcolor = _rating_color(rating)
+                borders.append({"pt1": (px, py), "pt2": (px + panel_w, py + panel_h), "color": color, "thick": 1})
+                texts.append({
+                    "text": top_label, "pos": (px + 3, py + th1 + 3),
+                    "scale": font_scale, "color": (235, 235, 235), "thick": thick,
+                })
+                texts.append({
+                    "text": bot_label, "pos": (px + 3, py + (th1 + 4) * 2),
+                    "scale": font_scale, "color": (180, 180, 180), "thick": thick,
+                })
+
+            # Player bbox border
+            thick_border = 3 if tid == highlighted_id else 2
+            borders.append({"pt1": (x1, y1), "pt2": (x2, y2), "color": color, "thick": thick_border})
+
+        # Single blend for all panel backgrounds
+        mask = np.any(overlay_layer > 0, axis=2)
+        if mask.any():
+            blended = cv2.addWeighted(overlay_layer, 0.65, frame, 0.35, 0)
+            frame[mask] = blended[mask]
+
+        # Draw borders and text after blend
+        for b in borders:
+            cv2.rectangle(frame, b["pt1"], b["pt2"], b["color"], b["thick"])
+        for t in texts:
+            cv2.putText(frame, t["text"], t["pos"], FONT, t["scale"], t["color"], t["thick"], cv2.LINE_AA)
+
+        # Ball indicator
+        if ball_pos is not None:
+            bx, by = int(ball_pos[0]), int(ball_pos[1])
+            cv2.circle(frame, (bx, by), 9, (255, 255, 255), 2)
+            cv2.circle(frame, (bx, by), 3, (255, 255, 255), -1)
+            cv2.line(frame, (bx - 13, by), (bx + 13, by), (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.line(frame, (bx, by - 13), (bx, by + 13), (255, 255, 255), 1, cv2.LINE_AA)
+
+        return frame
+
+    # ------------------------------------------------------------------
+    # Build WS payload
+    # ------------------------------------------------------------------
+
+    def _build_payload(
+        self,
+        frame: np.ndarray,
+        player_detections: list[dict],
+        ball_pos: tuple | None,
+    ) -> dict:
+        timestamp_s = self._timestamp_s()
+        players_out: list[dict] = []
+
+        for det in player_detections:
+            tid = det["tracker_id"]
+            player = self._registry.players.get(tid)
+            identity = self._identity_mgr.get_cached_identity(tid) or {}
+            live_stats = self._stats_tracker.get_stats(tid)
+            rating = self._rating_engine.get_rating(tid)
+            delta = self._rating_engine.get_delta(tid)
+            last_event = self._rating_engine.last_event.get(tid, "")
+            fc26_stats = self._fc26.get_for_track(tid)
+
+            name = identity.get("name") or (player.player_name if player else None)
+            jersey = identity.get("jersey_number") or (player.jersey_number if player else None)
+            team = det.get("team") or "unknown"
+
+            x1, y1, x2, y2 = map(int, det["bbox"])
+            bbox = [x1, y1, x2 - x1, y2 - y1]
+
+            speed_ms = 0.0
+            top_speed_ms = 0.0
+            distance_m = 0.0
+            sprints = 0
+            if live_stats:
+                speed_ms = live_stats.speed_history[-1] if live_stats.speed_history else 0.0
+                top_speed_ms = live_stats.top_speed_ms
+                distance_m = live_stats.distance_m
+                sprints = live_stats.sprint_count
+
+            fc26_out: dict | None = None
+            if fc26_stats:
+                fc26_out = {
+                    "overall":   fc26_stats.get("overall"),
+                    "pace":      fc26_stats.get("pace"),
+                    "shooting":  fc26_stats.get("shooting"),
+                    "passing":   fc26_stats.get("passing"),
+                    "dribbling": fc26_stats.get("dribbling"),
+                    "defending": fc26_stats.get("defending"),
+                    "physical":  fc26_stats.get("physical"),
+                }
+            elif identity.get("overall"):
+                fc26_out = {
+                    "overall":   identity.get("overall"),
+                    "pace":      identity.get("pace"),
+                    "shooting":  identity.get("shooting"),
+                    "passing":   identity.get("passing"),
+                    "dribbling": identity.get("dribbling"),
+                    "defending": identity.get("defending"),
+                    "physical":  identity.get("physical"),
+                }
+
+            players_out.append({
+                "track_id":       tid,
+                "name":           name,
+                "jersey":         jersey,
+                "team":           team,
+                "bbox":           bbox,
+                "speed_ms":       round(speed_ms, 2),
+                "top_speed_ms":   round(top_speed_ms, 2),
+                "distance_m":     round(distance_m, 1),
+                "sprints":        sprints,
+                "rating":         round(rating, 2),
+                "rating_delta":   round(delta, 3),
+                "last_event":     last_event,
+                "fc26":           fc26_out,
+            })
+
+        ball_out = None
+        if ball_pos is not None:
+            ball_out = {"x": int(ball_pos[0]), "y": int(ball_pos[1])}
+
+        # Encode frame to JPEG base64
+        _, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        frame_b64 = base64.b64encode(jpeg_buf.tobytes()).decode("ascii")
+
+        return {
+            "frame_id":    self._frame_num,
+            "timestamp_s": round(timestamp_s, 2),
+            "players":     players_out,
+            "ball":        ball_out,
+            "frame_b64":   frame_b64,
+        }
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+
+    def run(self) -> None:
+        """Main analysis loop — runs in a background thread."""
+        model = self._load_model()
+        start_real = time.monotonic()
+        fps_accumulator = 0.0
+        fps_alpha = 0.1
+
+        while not self._stop_event.is_set():
+            try:
+                frame = self._frame_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            t0 = time.monotonic()
+            run_yolo = (self._frame_num % YOLO_EVERY_N == 0)
+
+            player_detections: list[dict] = []
+            ball_pos: tuple[int, int] | None = None
+            ball_bbox: tuple | None = None
+
+            if run_yolo:
+                try:
+                    results = model.track(
+                        source=frame,
+                        conf=CONFIDENCE_THRESHOLD,
+                        iou=IOU_THRESHOLD,
+                        tracker=TRACKER,
+                        persist=True,
+                        classes=[PERSON_CLASS_ID, BALL_CLASS_ID],
+                        verbose=False,
+                    )[0]
+                except Exception:
+                    results = None
+
+                current_active_ids: set[int] = set()
+
+                if (
+                    results is not None
+                    and results.boxes is not None
+                    and results.boxes.id is not None
+                ):
+                    for box, cls, track_id in zip(
+                        results.boxes.xyxy.cpu().numpy(),
+                        results.boxes.cls.cpu().numpy(),
+                        results.boxes.id.cpu().numpy(),
+                    ):
+                        x1, y1, x2, y2 = map(int, box)
+                        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                        class_id = int(cls)
+                        tid = int(track_id)
+
+                        if class_id == PERSON_CLASS_ID:
+                            current_active_ids.add(tid)
+
+                            # Re-ID
+                            if tid not in self._registry.players:
+                                old_id = self._reid.match_new_id(tid, frame, (x1, y1, x2, y2), self._frame_num)
+                                if old_id is not None:
+                                    self._registry.get_or_create(tid)
+                                    merge_player(self._registry, old_id, tid)
+
+                            player = self._registry.get_or_create(tid)
+                            player.last_seen_frame = self._frame_num
+
+                            # Team classification
+                            if self._frame_num % 10 == 0:
+                                self._classifier.add_sample(frame, (x1, y1, x2, y2), tid)
+                            if not self._classifier.fitted and self._frame_num > 30:
+                                self._classifier.fit()
+                            team = self._classifier.classify(frame, (x1, y1, x2, y2))
+                            player.team = team
+
+                            # OCR jersey identity
+                            identity = self._identity_mgr.get_identity(
+                                tid, frame, (x1, y1, x2, y2), team, self._frame_num
+                            )
+
+                            # FC26 lookup when identity resolves
+                            name = identity.get("name")
+                            jersey_num = identity.get("jersey_number")
+                            if name:
+                                self._fc26.attach_to_track(tid, name)
+                                self._rating_engine.register_name(tid, name)
+                            elif jersey_num and team in ("A", "B"):
+                                self._fc26.attach_by_jersey(tid, team, jersey_num)
+
+                            # Speed tracking
+                            player.update_position(cx, cy, self._frame_num)
+                            speed_ms = player.get_average_speed()
+                            self._stats_tracker.update(
+                                tid, cx, cy, speed_ms, (x1, y1, x2, y2),
+                                ball_bbox,
+                            )
+
+                            player_detections.append({
+                                "tracker_id": tid,
+                                "bbox": (x1, y1, x2, y2),
+                                "center": (cx, cy),
+                                "team": team,
+                            })
+
+                            # Re-ID update
+                            self._reid.update(tid, frame, (x1, y1, x2, y2), self._frame_num)
+
+                        elif class_id == BALL_CLASS_ID:
+                            ball_pos = (cx, cy)
+                            ball_bbox = (x1, y1, x2, y2)
+
+                # Mark disappeared IDs as lost
+                disappeared = self._prev_active_ids - current_active_ids
+                for lost_tid in disappeared:
+                    self._reid.mark_lost(lost_tid, self._frame_num)
+                self._prev_active_ids = current_active_ids
+
+                self._last_player_detections = player_detections
+                self._last_ball_pos = ball_pos
+            else:
+                player_detections = self._last_player_detections
+                ball_pos = self._last_ball_pos
+
+            # Update stat engine
+            if run_yolo:
+                self._stat_engine.update(player_detections, ball_pos, self._frame_num)
+
+            # Build speed map for event detector
+            speed_map: dict[int, float] = {}
+            for det in player_detections:
+                tid = det["tracker_id"]
+                p = self._registry.players.get(tid)
+                if p:
+                    speed_map[tid] = p.get_average_speed()
+
+            # Event detection + rating updates
+            if run_yolo:
+                events = self._event_detector.detect(
+                    player_detections, ball_pos, speed_map, self._frame_num
+                )
+                ts = self._timestamp_s()
+                for tid, event_type in events:
+                    p = self._registry.players.get(tid)
+                    name = (p.player_name if p else None) or ""
+                    self._rating_engine.update(tid, event_type, self._frame_num, ts, name)
+
+                # Periodic decay
+                self._rating_engine.decay_all(ts)
+
+            # Draw annotated frame
+            annotated = self._draw_frame(frame, player_detections, ball_pos)
+
+            # Build and push WS payload (skip if broadcast_queue is already full)
+            try:
+                payload = self._build_payload(annotated, player_detections, ball_pos)
+                self._push(payload)
+            except Exception:
+                pass  # never block the analysis loop
+
+            self._frame_num += 1
+
+    def stop(self) -> None:
+        """Signal the analysis loop to stop."""
+        self._stop_event.set()
+        self._rating_engine.close()
+
+    @property
+    def frame_count(self) -> int:
+        return self._frame_num
+
+    @property
+    def player_count(self) -> int:
+        active = self._registry.active_players(self._frame_num)
+        return len(active)
