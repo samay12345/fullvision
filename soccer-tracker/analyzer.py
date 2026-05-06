@@ -26,6 +26,7 @@ from config import (
     PERSON_CLASS_ID,
     BALL_CLASS_ID,
     SPEED_SCALE_FACTOR,
+    TEAM_KIT_COLORS_BGR,
 )
 from tracker import PlayerRegistry, PlayerTracker, merge_player
 from team_classifier import TeamClassifier
@@ -82,6 +83,8 @@ class Analyzer:
         broadcast_queue: asyncio.Queue,
         fps: float,
         loop: asyncio.AbstractEventLoop,
+        home_team: str = "",
+        away_team: str = "",
     ):
         self._frame_queue = frame_queue
         self._broadcast_queue = broadcast_queue
@@ -100,6 +103,17 @@ class Analyzer:
         self._event_detector = EventDetector()
         self._fc26 = FC26Loader()
 
+        # Load team rosters and store kit colors for classifier alignment
+        self._home_kit_bgr: tuple | None = None
+        self._away_kit_bgr: tuple | None = None
+        self._classifier_aligned = False
+        if home_team and away_team:
+            home_key, away_key = self._identity_mgr.set_teams(home_team, away_team)
+            if home_key:
+                self._home_kit_bgr = TEAM_KIT_COLORS_BGR.get(home_key.lower())
+            if away_key:
+                self._away_kit_bgr = TEAM_KIT_COLORS_BGR.get(away_key.lower())
+
         # ── YOLO model (lazy load on first frame) ────────────────────────────
         self._model = None
 
@@ -110,6 +124,12 @@ class Analyzer:
         self._prev_active_ids: set[int] = set()
         self._start_time = time.monotonic()
         self._last_decay_ts = 0.0
+        self._key_events: dict[int, list[str]] = {}   # track_id -> recent key events
+        self._match_info: str = ""
+        # GK detection: collect (tid, crop) per team every GK_COLLECT_EVERY frames
+        self._gk_crops: dict[str, list[tuple[int, np.ndarray]]] = {"A": [], "B": []}
+        self._GK_DETECT_EVERY = 90   # run GK color detection every N frames
+        self._GK_MIN_PLAYERS  = 5    # need at least this many per team
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -173,7 +193,7 @@ class Analyzer:
             name = identity.get("name") or (player.player_name if player else None)
             jersey = identity.get("jersey_number") or (player.jersey_number if player else None)
             delta = self._rating_engine.get_delta(tid)
-            arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
+            arrow = "+" if delta > 0.001 else ("-" if delta < -0.001 else "=")
             if name:
                 surname = name.split()[-1]
                 id_part = f"#{jersey} {surname}" if jersey else surname
@@ -181,7 +201,7 @@ class Analyzer:
                 id_part = f"#{jersey}"
             else:
                 id_part = f"#{tid}"
-            star_str = f"[★{rating:.1f}{arrow}]"
+            star_str = f"[{rating:.1f}{arrow}]"
             top_label = f"{id_part}  {star_str}"
 
             # ── Bottom label: speed · distance · sprints ──────────────────
@@ -189,9 +209,9 @@ class Analyzer:
                 spd = live_stats.speed_history[-1] if live_stats.speed_history else 0.0
                 dist = live_stats.distance_m
                 spr = live_stats.sprint_count
-                bot_label = f"{spd:.1f}m/s · {dist:.0f}m · {spr}spr"
+                bot_label = f"{spd:.1f}m/s  {dist:.0f}m  {spr}spr"
             else:
-                bot_label = "0.0m/s · 0m · 0spr"
+                bot_label = "0.0m/s  0m  0spr"
 
             bbox_h = y2 - y1
             if bbox_h >= MIN_PANEL_H:
@@ -334,7 +354,7 @@ class Analyzer:
             ball_out = {"x": int(ball_pos[0]), "y": int(ball_pos[1])}
 
         # Encode frame to JPEG base64
-        _, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        _, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
         frame_b64 = base64.b64encode(jpeg_buf.tobytes()).decode("ascii")
 
         return {
@@ -409,6 +429,16 @@ class Analyzer:
                                 if old_id is not None:
                                     self._registry.get_or_create(tid)
                                     merge_player(self._registry, old_id, tid)
+                                    # Transfer identity and rating from the old track
+                                    old_identity = self._identity_mgr.get_cached_identity(old_id)
+                                    if old_identity and old_identity.get("jersey_number") is not None:
+                                        self._identity_mgr._id_cache[tid] = old_identity.copy()
+                                    old_rating = self._rating_engine.ratings.get(old_id)
+                                    if old_rating is not None:
+                                        self._rating_engine.ratings[tid] = old_rating
+                                        old_name = self._rating_engine._player_names.get(old_id, "")
+                                        if old_name:
+                                            self._rating_engine._player_names[tid] = old_name
 
                             player = self._registry.get_or_create(tid)
                             player.last_seen_frame = self._frame_num
@@ -418,8 +448,27 @@ class Analyzer:
                                 self._classifier.add_sample(frame, (x1, y1, x2, y2), tid)
                             if not self._classifier.fitted and self._frame_num > 30:
                                 self._classifier.fit()
+                                # Align cluster 0/1 → "A"/"B" using kit colors
+                                if (not self._classifier_aligned
+                                        and self._home_kit_bgr and self._away_kit_bgr):
+                                    self._classifier.auto_assign(
+                                        list(self._home_kit_bgr), list(self._away_kit_bgr), "A", "B"
+                                    )
+                                    self._classifier_aligned = True
                             team = self._classifier.classify(frame, (x1, y1, x2, y2))
                             player.team = team
+
+                            # Collect player crop for GK color detection
+                            if team in ("A", "B"):
+                                crop = frame[max(0,y1):max(y1+1,y2), max(0,x1):max(x1+1,x2)]
+                                buf = self._gk_crops[team]
+                                # Replace existing entry for this tid, or append
+                                for i, (btid, _) in enumerate(buf):
+                                    if btid == tid:
+                                        buf[i] = (tid, crop)
+                                        break
+                                else:
+                                    buf.append((tid, crop))
 
                             # OCR jersey identity
                             identity = self._identity_mgr.get_identity(
@@ -435,9 +484,9 @@ class Analyzer:
                             elif jersey_num and team in ("A", "B"):
                                 self._fc26.attach_by_jersey(tid, team, jersey_num)
 
-                            # Speed tracking
+                            # Speed tracking — use instantaneous speed for responsiveness
                             player.update_position(cx, cy, self._frame_num)
-                            speed_ms = player.get_average_speed()
+                            speed_ms = player.speeds[-1] if player.speeds else 0.0
                             self._stats_tracker.update(
                                 tid, cx, cy, speed_ms, (x1, y1, x2, y2),
                                 ball_bbox,
@@ -465,6 +514,13 @@ class Analyzer:
 
                 self._last_player_detections = player_detections
                 self._last_ball_pos = ball_pos
+
+                # Periodic GK auto-detection by jersey color
+                if self._frame_num % self._GK_DETECT_EVERY == 0:
+                    for team_label in ("A", "B"):
+                        crops = self._gk_crops[team_label]
+                        if len(crops) >= self._GK_MIN_PLAYERS:
+                            self._identity_mgr.detect_gk_by_color(team_label, crops)
             else:
                 player_detections = self._last_player_detections
                 ball_pos = self._last_ball_pos
@@ -479,18 +535,24 @@ class Analyzer:
                 tid = det["tracker_id"]
                 p = self._registry.players.get(tid)
                 if p:
-                    speed_map[tid] = p.get_average_speed()
+                    speed_map[tid] = p.speeds[-1] if p.speeds else 0.0
 
             # Event detection + rating updates
             if run_yolo:
                 events = self._event_detector.detect(
-                    player_detections, ball_pos, speed_map, self._frame_num
+                    player_detections, ball_pos, speed_map, self._frame_num,
+                    frame_shape=frame.shape,
                 )
                 ts = self._timestamp_s()
                 for tid, event_type in events:
                     p = self._registry.players.get(tid)
                     name = (p.player_name if p else None) or ""
                     self._rating_engine.update(tid, event_type, self._frame_num, ts, name)
+                    # Track key events per player for summary
+                    buf = self._key_events.setdefault(tid, [])
+                    buf.append(event_type)
+                    if len(buf) > 30:
+                        self._key_events[tid] = buf[-30:]
 
                 # Periodic decay
                 self._rating_engine.decay_all(ts)
@@ -506,6 +568,98 @@ class Analyzer:
                 pass  # never block the analysis loop
 
             self._frame_num += 1
+
+    def get_summary_stats(self) -> list[dict]:
+        """Return per-player stats for all roster players.
+
+        Players that were tracked get real stats; players not seen in the
+        footage are included with did_not_play=True so Claude can write a
+        one-liner for them. Falls back to tracked-only if no roster is loaded.
+        """
+        # Build (jersey, team) -> stats map from tracking data
+        tracked_by_jersey: dict[tuple, dict] = {}
+        for tid, player in self._registry.players.items():
+            identity = self._identity_mgr.get_cached_identity(tid) or {}
+            jersey = identity.get("jersey_number") or player.jersey_number
+            team = player.team
+            if not jersey or not team:
+                continue
+            live_stats = self._stats_tracker.get_stats(tid)
+            dist = live_stats.distance_m if live_stats else 0.0
+            existing = tracked_by_jersey.get((jersey, team))
+            if existing is None or dist > existing.get("distance_m", 0):
+                tracked_by_jersey[(jersey, team)] = {
+                    "track_id":     tid,
+                    "name":         identity.get("name") or player.player_name,
+                    "jersey":       jersey,
+                    "team":         team,
+                    "did_not_play": False,
+                    "rating":       self._rating_engine.get_rating(tid),
+                    "top_speed_ms": live_stats.top_speed_ms if live_stats else 0.0,
+                    "distance_m":   dist,
+                    "sprints":      live_stats.sprint_count if live_stats else 0,
+                    "passes":       player.passes,
+                    "tackles":      player.tackles,
+                    "shots":        player.shots,
+                    "key_events":   self._key_events.get(tid, []),
+                }
+
+        rosters = self._identity_mgr._rosters
+        result: list[dict] = []
+
+        if rosters:
+            # Roster-driven: include everyone (played or not)
+            for team_label in ("A", "B"):
+                roster = rosters.get(team_label, {})
+                for jersey_num, player_data in roster.items():
+                    name = player_data.get("full_name") or f"#{jersey_num}"
+                    tracked = tracked_by_jersey.get((jersey_num, team_label))
+                    if tracked:
+                        entry = dict(tracked)
+                        entry["name"] = name  # prefer DB name over OCR
+                        entry["position"] = player_data.get("position", "")
+                    else:
+                        entry = {
+                            "name":         name,
+                            "jersey":       jersey_num,
+                            "team":         team_label,
+                            "position":     player_data.get("position", ""),
+                            "did_not_play": True,
+                            "rating":       None,
+                            "top_speed_ms": 0.0,
+                            "distance_m":   0.0,
+                            "sprints":      0,
+                            "passes":       0,
+                            "tackles":      0,
+                            "shots":        0,
+                            "key_events":   [],
+                        }
+                    result.append(entry)
+        else:
+            # No roster: fall back to tracked players only
+            for tid, player in self._registry.players.items():
+                identity = self._identity_mgr.get_cached_identity(tid) or {}
+                live_stats = self._stats_tracker.get_stats(tid)
+                name = identity.get("name") or player.player_name
+                if not name and not player.jersey_number:
+                    continue
+                result.append({
+                    "track_id":     tid,
+                    "name":         name or f"#{player.jersey_number or tid}",
+                    "jersey":       identity.get("jersey_number") or player.jersey_number,
+                    "team":         player.team or "unknown",
+                    "did_not_play": False,
+                    "rating":       self._rating_engine.get_rating(tid),
+                    "top_speed_ms": live_stats.top_speed_ms if live_stats else 0.0,
+                    "distance_m":   live_stats.distance_m if live_stats else 0.0,
+                    "sprints":      live_stats.sprint_count if live_stats else 0,
+                    "passes":       player.passes,
+                    "tackles":      player.tackles,
+                    "shots":        player.shots,
+                    "key_events":   self._key_events.get(tid, []),
+                })
+
+        return result
 
     def stop(self) -> None:
         """Signal the analysis loop to stop."""

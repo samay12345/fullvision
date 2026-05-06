@@ -3,5 +3,7 @@ __pycache__/
 *.pt
 *.mp4
 *.json
+*.jsonl
 match_report.txt
 assets/
+.DS_Store

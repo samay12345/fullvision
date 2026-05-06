@@ -17,16 +17,27 @@ import time as _time
 # ---------------------------------------------------------------------------
 
 EVENT_DELTAS: dict[str, float] = {
-    "successful_pass":    +0.05,
-    "progressive_carry":  +0.08,
-    "sprint_burst":       +0.03,
-    "high_press":         +0.06,
-    "goal_involvement":   +0.50,
-    "defensive_intercept":+0.10,
-    "misplaced_pass":     -0.08,
-    "losing_possession":  -0.10,
-    "poor_positioning":   -0.05,
-    "standing_still":     -0.03,
+    # --- Attacking ---
+    "successful_pass":      +0.04,
+    "key_pass":             +0.22,   # pass directly leading to a shot
+    "progressive_carry":    +0.08,
+    "dribble_success":      +0.12,
+    "shot_on_target":       +0.28,
+    "shot_off_target":      +0.08,
+    "goal_involvement":     +0.50,
+    # --- Defensive ---
+    "tackle_won":           +0.18,
+    "defensive_intercept":  +0.12,
+    "clearance":            +0.08,
+    "high_press":           +0.05,
+    "sprint_burst":         +0.03,
+    # --- Negative ---
+    "misplaced_pass":       -0.08,
+    "losing_possession":    -0.10,
+    "dribble_fail":         -0.10,
+    "tackle_lost":          -0.08,
+    "poor_positioning":     -0.05,
+    "standing_still":       -0.03,
 }
 
 DEFAULT_RATING = 6.5
@@ -203,39 +214,80 @@ class EventDetector:
     """
     Stateful per-player event detector.
 
+    Tracks passes, tackles, shots, dribbles, sprints, pressing, and carries.
     Call detect() every YOLO frame to get a list of (track_id, event_type).
     """
 
-    SPRINT_SPEED_MS = 5.5          # m/s threshold
-    SPRINT_MIN_FRAMES = 50         # consecutive frames to count as sprint_burst
-    STILL_SPEED_MS = 0.3           # m/s threshold for standing_still
-    STILL_MIN_FRAMES = 600         # consecutive frames to count as standing_still
-    PROGRESSIVE_CARRY_FRAMES = 30  # frames moving toward goal to count as progressive_carry
-    HIGH_PRESS_DIST_PX = 80        # pixel distance for high press detection
+    SPRINT_SPEED_MS = 3.5
+    SPRINT_MIN_FRAMES = 12
+    STILL_SPEED_MS = 0.5
+    STILL_MIN_FRAMES = 100
+    PROGRESSIVE_CARRY_FRAMES = 8
+    HIGH_PRESS_DIST_PX = 100
+
+    # Shot detection
+    SHOT_SPEED_PX = 18          # min ball px/frame velocity to consider a shot
+    SHOT_GOAL_X_FRAC = 0.12     # goal regions occupy this fraction of frame width from each side
+
+    # Tackle: ball changes from one team to another near two players touching
+    TACKLE_IOU_THRESH = 0.05    # bboxes must overlap this much to be a tackle (not a pass)
+
+    # Dribble: owner holds ball for N frames while an opponent is close
+    DRIBBLE_OPPONENT_DIST = 90  # px — opponent must be within this distance
+    DRIBBLE_MIN_FRAMES = 6      # frames holding ball near opponent = dribble success
 
     def __init__(self):
-        # Consecutive counters
         self._sprint_frames: dict[int, int] = {}
         self._still_frames: dict[int, int] = {}
         self._carry_frames: dict[int, int] = {}
+        self._dribble_frames: dict[int, int] = {}
         self._in_sprint: dict[int, bool] = {}
         self._in_still: dict[int, bool] = {}
         self._in_carry: dict[int, bool] = {}
+        self._in_dribble: dict[int, bool] = {}
 
-        # Ball ownership per frame
+        # Ball ownership history
         self._ball_owner_this: int | None = None
         self._ball_owner_prev: int | None = None
+        self._ownership_history: list[int | None] = []  # last 10 owners
 
-        # Team mapping: track_id -> "A" | "B"
+        # Ball position history for velocity
+        self._ball_pos_history: list[tuple[float, float]] = []
+
+        # Team mapping
         self._player_teams: dict[int, str] = {}
-
-        # Goal side: which direction is "progressive" for each team
-        # "A" attacks right (x increases), "B" attacks left (x decreases)
         self._attacking_right: dict[str, bool] = {"A": True, "B": False}
 
+        # Frame dimensions (set on first call)
+        self._frame_w: int = 1280
+        self._frame_h: int = 720
+
+        # Cooldowns to avoid duplicate event spam
+        self._last_shot_frame: int = -999
+        self._last_press_frame: dict[int, int] = {}
+        self._last_tackle_frame: dict[int, int] = {}
+
     def set_attacking_direction(self, team: str, attacks_right: bool) -> None:
-        """Configure which horizontal direction a team attacks."""
         self._attacking_right[team] = attacks_right
+
+    def _ball_speed_px(self) -> float:
+        """Return current ball speed in px/frame based on last 2 positions."""
+        if len(self._ball_pos_history) < 2:
+            return 0.0
+        p1 = self._ball_pos_history[-2]
+        p2 = self._ball_pos_history[-1]
+        return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+
+    def _ball_heading_to_goal(self) -> bool:
+        """True if the ball's velocity vector points roughly toward either goal."""
+        if len(self._ball_pos_history) < 2:
+            return False
+        p1 = self._ball_pos_history[-2]
+        p2 = self._ball_pos_history[-1]
+        dx = p2[0] - p1[0]
+        bx = p2[0] / self._frame_w
+        # Ball moving left toward left goal, or right toward right goal
+        return (dx < -3 and bx < 0.35) or (dx > 3 and bx > 0.65)
 
     def detect(
         self,
@@ -243,22 +295,13 @@ class EventDetector:
         ball_pos: tuple | None,
         speed_map: dict[int, float],
         frame_num: int,
+        frame_shape: tuple = (720, 1280),
     ) -> list[tuple[int, str]]:
         """
-        Detect events for this frame.
-
-        Parameters
-        ----------
-        player_detections : list of dicts with keys: tracker_id, bbox, center, team
-        ball_pos : (bx, by) or None
-        speed_map : track_id -> speed_ms (current)
-        frame_num : current frame index
-
-        Returns
-        -------
-        list of (track_id, event_type)
+        Returns list of (track_id, event_type) detected this frame.
         """
         events: list[tuple[int, str]] = []
+        self._frame_h, self._frame_w = frame_shape[:2]
 
         # Update team mapping
         for det in player_detections:
@@ -266,51 +309,102 @@ class EventDetector:
             if det.get("team"):
                 self._player_teams[tid] = det["team"]
 
+        # Track ball position history
+        if ball_pos is not None:
+            self._ball_pos_history.append((float(ball_pos[0]), float(ball_pos[1])))
+            if len(self._ball_pos_history) > 10:
+                self._ball_pos_history = self._ball_pos_history[-10:]
+
         # Determine ball owner this frame
         self._ball_owner_prev = self._ball_owner_this
         self._ball_owner_this = None
         if ball_pos is not None and player_detections:
             bx, by = ball_pos
-            min_dist = float("inf")
-            closest_id = None
+            min_dist, closest_id = float("inf"), None
             for det in player_detections:
                 cx, cy = det["center"]
                 d = math.hypot(cx - bx, cy - by)
                 if d < min_dist:
                     min_dist = d
                     closest_id = det["tracker_id"]
-            if min_dist < 80:  # within 80px = has the ball
+            if min_dist < 80:
                 self._ball_owner_this = closest_id
+
+        self._ownership_history.append(self._ball_owner_this)
+        if len(self._ownership_history) > 10:
+            self._ownership_history = self._ownership_history[-10:]
 
         det_map: dict[int, dict] = {d["tracker_id"]: d for d in player_detections}
 
-        # --- Pass events ---
+        # ── Pass / Tackle / Interception detection ────────────────────────────
         prev_owner = self._ball_owner_prev
         cur_owner = self._ball_owner_this
         if prev_owner is not None and cur_owner is not None and prev_owner != cur_owner:
             prev_team = self._player_teams.get(prev_owner)
             cur_team = self._player_teams.get(cur_owner)
             if prev_team and cur_team:
-                if prev_team == cur_team:
-                    events.append((prev_owner, "successful_pass"))
-                else:
-                    # Check IoU for tackle vs misplaced pass
-                    prev_det = det_map.get(prev_owner)
-                    cur_det = det_map.get(cur_owner)
-                    if prev_det and cur_det:
-                        iou = _bbox_iou(prev_det["bbox"], cur_det["bbox"])
-                        if iou > 0.1:
-                            events.append((prev_owner, "losing_possession"))
-                        else:
-                            events.append((prev_owner, "misplaced_pass"))
+                prev_det = det_map.get(prev_owner)
+                cur_det = det_map.get(cur_owner)
+                iou = _bbox_iou(prev_det["bbox"], cur_det["bbox"]) if (prev_det and cur_det) else 0.0
 
+                if prev_team == cur_team:
+                    # Same team: successful pass
+                    # Was there a shot right before? → could be a rebound assist
+                    events.append((prev_owner, "successful_pass"))
+                    # Check if this pass came right after a shot → key pass candidate
+                    # (handled in shot detection below)
+                else:
+                    # Opposition gained the ball
+                    if iou > self.TACKLE_IOU_THRESH:
+                        # Players overlapping → tackle
+                        cooldown = self._last_tackle_frame.get(cur_owner, -999)
+                        if frame_num - cooldown > 20:
+                            events.append((cur_owner, "tackle_won"))
+                            events.append((prev_owner, "tackle_lost"))
+                            self._last_tackle_frame[cur_owner] = frame_num
+                            self._last_tackle_frame[prev_owner] = frame_num
+                    else:
+                        # No overlap → interception or misplaced pass
+                        ball_spd = self._ball_speed_px()
+                        if ball_spd > 8:
+                            # Fast ball that was intercepted
+                            events.append((cur_owner, "defensive_intercept"))
+                        events.append((prev_owner, "misplaced_pass"))
+
+        # ── Shot detection ────────────────────────────────────────────────────
+        ball_spd = self._ball_speed_px()
+        if (
+            ball_spd > self.SHOT_SPEED_PX
+            and self._ball_owner_prev is not None
+            and self._ball_owner_this is None          # ball no longer near a player
+            and (frame_num - self._last_shot_frame) > 30
+        ):
+            shooter_id = self._ball_owner_prev
+            if self._ball_heading_to_goal():
+                events.append((shooter_id, "shot_on_target"))
+            else:
+                events.append((shooter_id, "shot_off_target"))
+            self._last_shot_frame = frame_num
+
+            # Retroactively mark the pass before this shot as a key_pass
+            # (find who passed to the shooter in the last 5 frames)
+            for i in range(len(self._ownership_history) - 2, -1, -1):
+                prev_o = self._ownership_history[i]
+                if prev_o is not None and prev_o != shooter_id:
+                    prev_t = self._player_teams.get(prev_o)
+                    shooter_t = self._player_teams.get(shooter_id)
+                    if prev_t and prev_t == shooter_t:
+                        events.append((prev_o, "key_pass"))
+                    break
+
+        # ── Per-player events ─────────────────────────────────────────────────
         for det in player_detections:
             tid = det["tracker_id"]
             speed = speed_map.get(tid, 0.0)
             cx, cy = det["center"]
             team = self._player_teams.get(tid)
 
-            # --- Sprint burst ---
+            # Sprint burst
             if speed > self.SPRINT_SPEED_MS:
                 self._sprint_frames[tid] = self._sprint_frames.get(tid, 0) + 1
                 if (
@@ -323,7 +417,7 @@ class EventDetector:
                 self._sprint_frames[tid] = 0
                 self._in_sprint[tid] = False
 
-            # --- Standing still ---
+            # Standing still penalty
             if speed < self.STILL_SPEED_MS:
                 self._still_frames[tid] = self._still_frames.get(tid, 0) + 1
                 if (
@@ -336,7 +430,7 @@ class EventDetector:
                 self._still_frames[tid] = 0
                 self._in_still[tid] = False
 
-            # --- High press ---
+            # High press
             if ball_pos is not None and self._ball_owner_this is not None:
                 owner_id = self._ball_owner_this
                 owner_team = self._player_teams.get(owner_id)
@@ -344,23 +438,56 @@ class EventDetector:
                     owner_det = det_map.get(owner_id)
                     if owner_det is not None:
                         ox, oy = owner_det["center"]
-                        dist_to_ball_holder = math.hypot(cx - ox, cy - oy)
-                        if dist_to_ball_holder < self.HIGH_PRESS_DIST_PX:
+                        dist_to_holder = math.hypot(cx - ox, cy - oy)
+                        cooldown = self._last_press_frame.get(tid, -999)
+                        if dist_to_holder < self.HIGH_PRESS_DIST_PX and (frame_num - cooldown) > 15:
                             events.append((tid, "high_press"))
+                            self._last_press_frame[tid] = frame_num
 
-            # --- Progressive carry ---
+            # Progressive carry
             if tid == self._ball_owner_this and team is not None:
-                attacks_right = self._attacking_right.get(team, True)
                 self._carry_frames[tid] = self._carry_frames.get(tid, 0) + 1
-                if self._carry_frames[tid] >= self.PROGRESSIVE_CARRY_FRAMES:
-                    if not self._in_carry.get(tid, False):
-                        events.append((tid, "progressive_carry"))
-                        self._in_carry[tid] = True
+                if (
+                    self._carry_frames[tid] >= self.PROGRESSIVE_CARRY_FRAMES
+                    and not self._in_carry.get(tid, False)
+                ):
+                    events.append((tid, "progressive_carry"))
+                    self._in_carry[tid] = True
             else:
                 carry = self._carry_frames.get(tid, 0)
                 if carry > 0:
                     self._carry_frames[tid] = max(0, carry - 3)
                 self._in_carry[tid] = False
+
+            # Dribble: ball owner sustained near opponent
+            if tid == self._ball_owner_this and team is not None:
+                near_opponent = False
+                for other in player_detections:
+                    oid = other["tracker_id"]
+                    if oid == tid:
+                        continue
+                    if self._player_teams.get(oid) != team:
+                        ox, oy = other["center"]
+                        if math.hypot(cx - ox, cy - oy) < self.DRIBBLE_OPPONENT_DIST:
+                            near_opponent = True
+                            break
+                if near_opponent:
+                    self._dribble_frames[tid] = self._dribble_frames.get(tid, 0) + 1
+                    if (
+                        self._dribble_frames[tid] >= self.DRIBBLE_MIN_FRAMES
+                        and not self._in_dribble.get(tid, False)
+                    ):
+                        events.append((tid, "dribble_success"))
+                        self._in_dribble[tid] = True
+                else:
+                    self._dribble_frames[tid] = 0
+                    self._in_dribble[tid] = False
+            else:
+                # Lost the ball while dribbling = dribble fail
+                if self._in_dribble.get(tid, False):
+                    events.append((tid, "dribble_fail"))
+                self._in_dribble[tid] = False
+                self._dribble_frames[tid] = 0
 
         return events
 
