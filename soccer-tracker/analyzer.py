@@ -131,9 +131,37 @@ class Analyzer:
         self._GK_DETECT_EVERY = 90   # run GK color detection every N frames
         self._GK_MIN_PLAYERS  = 5    # need at least this many per team
 
+        # Possession + xG + event log + recording
+        self._possession_frames: dict[str, int] = {"A": 0, "B": 0}
+        self._xg_totals: dict[str, float] = {"A": 0.0, "B": 0.0}
+        self._event_log: list[dict] = []   # max 200 entries
+        self._should_record: bool = False
+        self._recorder = None              # cv2.VideoWriter when active
+        self._recording_path: str | None = None
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _compute_xg(self, ball_pos: tuple | None, frame_shape: tuple) -> float:
+        """Rule-based xG from shot distance to nearest goal (normalized coords)."""
+        if ball_pos is None:
+            return 0.03
+        bx, by = ball_pos
+        fh, fw = frame_shape[:2]
+        if fw == 0 or fh == 0:
+            return 0.03
+        nx, ny = bx / fw, by / fh
+        dist = min(
+            math.sqrt(nx**2 + (ny - 0.5)**2),
+            math.sqrt((1 - nx)**2 + (ny - 0.5)**2),
+        )
+        if dist < 0.08:  return 0.50
+        if dist < 0.12:  return 0.30
+        if dist < 0.18:  return 0.16
+        if dist < 0.25:  return 0.08
+        if dist < 0.35:  return 0.04
+        return 0.02
 
     def _load_model(self):
         if self._model is None:
@@ -363,6 +391,13 @@ class Analyzer:
             "players":     players_out,
             "ball":        ball_out,
             "frame_b64":   frame_b64,
+            "possession_a": round(100 * self._possession_frames.get("A", 0) / max(1, sum(self._possession_frames.values()))),
+            "possession_b": round(100 * self._possession_frames.get("B", 0) / max(1, sum(self._possession_frames.values()))),
+            "xg_a": round(self._xg_totals.get("A", 0.0), 2),
+            "xg_b": round(self._xg_totals.get("B", 0.0), 2),
+            "event_log": self._event_log[-25:],
+            "frame_w": frame.shape[1],
+            "frame_h": frame.shape[0],
         }
 
     # ------------------------------------------------------------------
@@ -529,6 +564,20 @@ class Analyzer:
             if run_yolo:
                 self._stat_engine.update(player_detections, ball_pos, self._frame_num)
 
+                # Possession: assign ball to nearest player's team
+                if ball_pos is not None and player_detections:
+                    bx2, by2 = ball_pos
+                    best_dist = float("inf")
+                    poss_team = None
+                    for det in player_detections:
+                        cx2, cy2 = det["center"]
+                        d2 = (cx2 - bx2)**2 + (cy2 - by2)**2
+                        if d2 < best_dist:
+                            best_dist = d2
+                            poss_team = det.get("team")
+                    if poss_team in ("A", "B") and best_dist < 150**2:
+                        self._possession_frames[poss_team] = self._possession_frames.get(poss_team, 0) + 1
+
             # Build speed map for event detector
             speed_map: dict[int, float] = {}
             for det in player_detections:
@@ -554,11 +603,50 @@ class Analyzer:
                     if len(buf) > 30:
                         self._key_events[tid] = buf[-30:]
 
+                    # xG on shots
+                    if event_type in ("shot_on_target", "shot_off_target"):
+                        xg = self._compute_xg(ball_pos, frame.shape)
+                        t_team = next((d["team"] for d in player_detections if d["tracker_id"] == tid), None)
+                        if t_team in ("A", "B"):
+                            self._xg_totals[t_team] = self._xg_totals.get(t_team, 0.0) + xg
+
+                    # Event log entry
+                    ev_player = self._registry.players.get(tid)
+                    ev_identity = self._identity_mgr.get_cached_identity(tid) or {}
+                    ev_name = ev_identity.get("name") or (ev_player.player_name if ev_player else None) or f"#{tid}"
+                    ev_team = (ev_player.team if ev_player else None) or "?"
+                    ev_jersey = ev_identity.get("jersey_number") or (ev_player.jersey_number if ev_player else None)
+                    self._event_log.append({
+                        "ts":     round(self._timestamp_s(), 1),
+                        "player": ev_name,
+                        "jersey": ev_jersey,
+                        "team":   ev_team,
+                        "event":  event_type,
+                    })
+                    if len(self._event_log) > 200:
+                        self._event_log = self._event_log[-200:]
+
                 # Periodic decay
                 self._rating_engine.decay_all(ts)
 
             # Draw annotated frame
             annotated = self._draw_frame(frame, player_detections, ball_pos)
+
+            # Recording
+            if self._should_record and self._recorder is None:
+                import datetime, os as _os
+                _os.makedirs("recordings", exist_ok=True)
+                fname = f"recordings/match_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+                fh2, fw2 = annotated.shape[:2]
+                self._recorder = cv2.VideoWriter(
+                    fname, cv2.VideoWriter_fourcc(*"mp4v"), self._fps, (fw2, fh2)
+                )
+                self._recording_path = fname
+            if self._recorder is not None:
+                try:
+                    self._recorder.write(annotated)
+                except Exception:
+                    pass
 
             # Build and push WS payload (skip if broadcast_queue is already full)
             try:
@@ -660,6 +748,19 @@ class Analyzer:
                 })
 
         return result
+
+    def start_recording(self) -> None:
+        self._should_record = True
+
+    def stop_recording(self) -> str | None:
+        self._should_record = False
+        if self._recorder is not None:
+            self._recorder.release()
+            self._recorder = None
+            path = self._recording_path
+            self._recording_path = None
+            return path
+        return None
 
     def stop(self) -> None:
         """Signal the analysis loop to stop."""

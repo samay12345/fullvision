@@ -195,6 +195,85 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   border: 2px solid rgba(255,255,255,.25); border-top-color: #fff;
   border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; margin-right: 4px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Possession bar ────────────────────────────────────────────────── */
+#possession-bar { position: absolute; bottom: 0; left: 0; right: 0; height: 36px;
+  background: rgba(0,0,0,.75); display: flex; align-items: center; z-index: 10; }
+.poss-team { display: flex; align-items: center; gap: 6px; padding: 0 10px; flex: 1; }
+.poss-team.right { flex-direction: row-reverse; }
+.poss-pct { font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; min-width: 36px; }
+.poss-fill { height: 6px; border-radius: 3px; transition: width .5s; }
+.poss-fill.a { background: var(--team-a); }
+.poss-fill.b { background: var(--team-b); }
+.poss-center { font-size: 9px; font-weight: 700; letter-spacing: .1em; color: var(--muted);
+  text-transform: uppercase; white-space: nowrap; padding: 0 8px; }
+.xg-val { font-size: 10px; color: var(--muted); }
+
+/* ── Mini-map ──────────────────────────────────────────────────────── */
+#minimap-wrap { position: absolute; top: 10px; right: 10px; z-index: 10;
+  border: 1px solid rgba(255,255,255,.15); border-radius: 6px; overflow: hidden;
+  background: rgba(0,0,0,.5); }
+#minimap { display: block; }
+
+/* ── Events tab ────────────────────────────────────────────────────── */
+#events-tab { overflow-y: auto; min-height: 0; }
+.ev-row { display: flex; align-items: center; gap: 7px; padding: 5px 10px;
+  border-bottom: 1px solid var(--border); font-size: 11px; }
+.ev-time { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 36px; flex-shrink: 0; }
+.ev-dot  { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.ev-player { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ev-badge { font-size: 9px; padding: 2px 6px; border-radius: 10px; font-weight: 700;
+  background: var(--surface); color: var(--muted); white-space: nowrap; }
+.ev-badge.positive { background: #162a18; color: var(--green); }
+.ev-badge.negative { background: #2a1212; color: var(--red); }
+
+/* ── Spotlight panel ───────────────────────────────────────────────── */
+#spotlight { position: absolute; inset: 0; background: var(--surface); z-index: 50;
+  display: none; flex-direction: column; overflow-y: auto; }
+#spotlight.open { display: flex; }
+.sp-header { display: flex; align-items: center; gap: 10px; padding: 12px 12px 8px;
+  border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.sp-back { background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 16px; padding: 0; line-height: 1; }
+.sp-back:hover { color: var(--text); }
+.sp-name { font-size: 14px; font-weight: 800; flex: 1; }
+.sp-rating { font-size: 22px; font-weight: 900; }
+.sp-team-badge { font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 10px; }
+.sp-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px 12px; }
+.sp-stat { background: var(--surface2); border-radius: 6px; padding: 8px 10px; }
+.sp-stat-label { font-size: 9px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .06em; margin-bottom: 3px; }
+.sp-stat-val { font-size: 16px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.sp-fc26 { padding: 0 12px 10px; }
+.sp-fc26-title { font-size: 9px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--muted); margin-bottom: 6px; }
+.sp-fc26-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.sp-fc26-label { font-size: 10px; color: var(--muted); width: 60px; flex-shrink: 0; }
+.sp-fc26-bar-wrap { flex: 1; height: 5px; background: var(--surface); border-radius: 3px; overflow: hidden; }
+.sp-fc26-bar { height: 100%; border-radius: 3px; }
+.sp-fc26-val { font-size: 10px; font-weight: 700; min-width: 24px; text-align: right; }
+.sp-events { padding: 0 12px 12px; }
+
+/* ── Commentary box ────────────────────────────────────────────────── */
+#commentary-box { background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px; font-size: 11px; line-height: 1.6;
+  color: var(--text); display: none; margin-bottom: 8px; flex-shrink: 0; }
+#commentary-box.visible { display: block; }
+#get-commentary-btn { width: 100%; padding: 8px; border-radius: 7px;
+  background: #1a2a1a; border: 1px solid var(--green); color: var(--green);
+  font-size: 11px; font-weight: 700; cursor: pointer; flex-shrink: 0; margin-bottom: 8px; }
+#get-commentary-btn:hover { opacity: .85; }
+#get-commentary-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ── Record button ─────────────────────────────────────────────────── */
+.btn-record { padding: 5px 10px; background: var(--surface); border: 1px solid var(--border);
+  color: var(--muted); border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 700;
+  transition: all .12s; }
+.btn-record.recording { background: #3a0000; border-color: var(--red); color: var(--red); }
+.btn-record.recording::before { content: ''; display: inline-block; width: 8px; height: 8px;
+  background: var(--red); border-radius: 50%; margin-right: 5px;
+  animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
 </style>
 </head>
 <body>
@@ -202,6 +281,26 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <!-- Video -->
   <div id="video-cell">
     <canvas id="feed"></canvas>
+    <div id="minimap-wrap" title="Live pitch view">
+      <canvas id="minimap" width="160" height="100"></canvas>
+    </div>
+    <div id="possession-bar">
+      <div class="poss-team">
+        <span class="poss-pct" id="poss-a-pct" style="color:var(--team-a)">50%</span>
+        <div style="flex:1;background:var(--surface2);height:6px;border-radius:3px;overflow:hidden">
+          <div class="poss-fill a" id="poss-a-fill" style="width:50%;height:100%"></div>
+        </div>
+        <span class="xg-val" id="xg-a-val">xG 0.00</span>
+      </div>
+      <div class="poss-center">Possession</div>
+      <div class="poss-team right">
+        <span class="xg-val" id="xg-b-val">xG 0.00</span>
+        <div style="flex:1;background:var(--surface2);height:6px;border-radius:3px;overflow:hidden;direction:rtl">
+          <div class="poss-fill b" id="poss-b-fill" style="width:50%;height:100%"></div>
+        </div>
+        <span class="poss-pct" id="poss-b-pct" style="color:var(--team-b)">50%</span>
+      </div>
+    </div>
     <div id="no-signal">
       <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
         <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
@@ -212,10 +311,24 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   <!-- Sidebar -->
   <div id="sidebar">
+    <div id="spotlight">
+      <div class="sp-header">
+        <button class="sp-back" onclick="closeSpotlight()">&#8592;</button>
+        <div>
+          <div class="sp-name" id="sp-name">Player</div>
+          <span class="sp-team-badge" id="sp-team-badge"></span>
+        </div>
+        <div class="sp-rating" id="sp-rating-big"></div>
+      </div>
+      <div class="sp-stat-grid" id="sp-stat-grid"></div>
+      <div class="sp-fc26" id="sp-fc26"></div>
+      <div class="sp-events" id="sp-events"></div>
+    </div>
     <div class="tab-bar">
       <div class="tab active" id="tab-live" onclick="switchTab('live')">Live</div>
       <div class="tab" id="tab-lineup" onclick="switchTab('lineup')">Lineup</div>
       <div class="tab" id="tab-summary" onclick="switchTab('summary')">Summary</div>
+      <div class="tab" id="tab-events" onclick="switchTab('events')">Events</div>
     </div>
 
     <!-- Live ratings -->
@@ -270,9 +383,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
     <!-- Summary -->
     <div class="tab-content" id="summary-tab">
+      <button id="get-commentary-btn" onclick="getCommentary()">&#127897; Get Live Commentary</button>
+      <div id="commentary-box"></div>
       <button id="gen-summary-btn" onclick="generateSummary()">Generate Match Summary</button>
       <div id="match-narrative"></div>
       <div id="summary-cards"></div>
+    </div>
+
+    <!-- Events -->
+    <div class="tab-content" id="events-tab">
+      <div id="event-log-list" style="flex:1;overflow-y:auto;min-height:0">
+        <div style="text-align:center;color:var(--muted);padding:24px 10px;font-size:11px">
+          Events will appear here during the match
+        </div>
+      </div>
     </div>
   </div>
 
@@ -285,6 +409,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <input id="away-team-input"  class="sb-input team-input" placeholder="Away team" />
     <button class="btn btn-primary"  id="analyze-btn" onclick="startAnalysis()">&#9654; Analyze</button>
     <button class="btn btn-danger"   id="stop-btn"    onclick="stopAnalysis()" style="display:none">&#9632; Stop</button>
+    <button class="btn-record" id="record-btn" onclick="toggleRecording()" title="Record annotated video">&#9210; Record</button>
     <button class="btn-icon" onclick="openKeyModal()" title="Set API key">&#128273;</button>
     <span id="status-text">Ready</span>
   </div>
@@ -313,6 +438,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 let ws = null, wsRetry = null;
 let latestPlayers = [], highlightedId = null, teamFilter = 'all';
 let lastFrameTs = 0, fpsSamples = [];
+let lastEventLog = [];
 const canvas = document.getElementById('feed');
 const ctx    = canvas.getContext('2d');
 
@@ -366,6 +492,11 @@ function handleFrame(data) {
     img.src = 'data:image/jpeg;base64,' + data.frame_b64;
   }
   if (data.players !== undefined) { latestPlayers = data.players; renderPlayerList(); }
+  if (data.frame_w) frameW = data.frame_w;
+  if (data.frame_h) frameH = data.frame_h;
+  if (data.possession_a !== undefined) updatePossession(data);
+  if (data.event_log) { lastEventLog = data.event_log; updateEventLog(data.event_log); }
+  drawMinimap(data.players, data.ball);
 
   const now = performance.now();
   if (lastFrameTs > 0) { fpsSamples.push(1000 / (now - lastFrameTs)); if (fpsSamples.length > 20) fpsSamples.shift(); }
@@ -435,6 +566,206 @@ function renderPlayerList() {
 function selectPlayer(id) {
   highlightedId = (highlightedId === id) ? null : id;
   renderPlayerList();
+  const p = latestPlayers.find(pl => pl.track_id === id);
+  if (p) openSpotlight(p);
+}
+
+// ── Mini-map ─────────────────────────────────────────────────────────────────
+let frameW = 1920, frameH = 1080;
+const mmCanvas = document.getElementById('minimap');
+const mmCtx = mmCanvas.getContext('2d');
+const MM_W = 160, MM_H = 100;
+
+function drawMinimap(players, ball) {
+  mmCtx.fillStyle = '#1a4a1a';
+  mmCtx.fillRect(0, 0, MM_W, MM_H);
+  // Pitch markings
+  mmCtx.strokeStyle = 'rgba(255,255,255,0.25)';
+  mmCtx.lineWidth = 0.5;
+  mmCtx.strokeRect(4, 4, MM_W-8, MM_H-8);
+  mmCtx.beginPath(); mmCtx.moveTo(MM_W/2, 4); mmCtx.lineTo(MM_W/2, MM_H-4); mmCtx.stroke();
+  mmCtx.beginPath(); mmCtx.arc(MM_W/2, MM_H/2, 12, 0, Math.PI*2); mmCtx.stroke();
+  // Penalty boxes
+  const pb_w = 28, pb_h = 42;
+  mmCtx.strokeRect(4, (MM_H-pb_h)/2, pb_w, pb_h);
+  mmCtx.strokeRect(MM_W-4-pb_w, (MM_H-pb_h)/2, pb_w, pb_h);
+
+  // Players
+  (players || []).forEach(p => {
+    if (!p.bbox) return;
+    const px = (p.bbox[0] + p.bbox[2]/2) / frameW * (MM_W-8) + 4;
+    const py = (p.bbox[1] + p.bbox[3]/2) / frameH * (MM_H-8) + 4;
+    mmCtx.beginPath();
+    mmCtx.arc(px, py, 3, 0, Math.PI*2);
+    mmCtx.fillStyle = p.team==='A' ? '#4f8ef7' : p.team==='B' ? '#ef4444' : '#888';
+    mmCtx.fill();
+  });
+  // Ball
+  if (ball) {
+    const bx = ball.x / frameW * (MM_W-8) + 4;
+    const by = ball.y / frameH * (MM_H-8) + 4;
+    mmCtx.beginPath(); mmCtx.arc(bx, by, 2.5, 0, Math.PI*2);
+    mmCtx.fillStyle = '#fff'; mmCtx.fill();
+  }
+}
+
+// ── Possession ────────────────────────────────────────────────────────────────
+function updatePossession(data) {
+  const pa = data.possession_a ?? 50;
+  const pb = data.possession_b ?? 50;
+  document.getElementById('poss-a-pct').textContent = pa + '%';
+  document.getElementById('poss-b-pct').textContent = pb + '%';
+  document.getElementById('poss-a-fill').style.width = pa + '%';
+  document.getElementById('poss-b-fill').style.width = pb + '%';
+  document.getElementById('xg-a-val').textContent = 'xG ' + (data.xg_a ?? 0).toFixed(2);
+  document.getElementById('xg-b-val').textContent = 'xG ' + (data.xg_b ?? 0).toFixed(2);
+}
+
+// ── Event log ─────────────────────────────────────────────────────────────────
+const positiveEvents = new Set(['successful_pass','key_pass','progressive_carry','dribble_success',
+  'shot_on_target','shot_off_target','goal_involvement','tackle_won','defensive_intercept',
+  'clearance','high_press','sprint_burst']);
+const negativeEvents = new Set(['misplaced_pass','losing_possession','dribble_fail',
+  'tackle_lost','poor_positioning','standing_still']);
+
+function updateEventLog(events) {
+  if (!events || !events.length) return;
+  const list = document.getElementById('event-log-list');
+  list.innerHTML = [...events].reverse().map(e => {
+    const dot = e.team==='A' ? 'var(--team-a)' : e.team==='B' ? 'var(--team-b)' : '#555';
+    const cls = positiveEvents.has(e.event) ? 'positive' : negativeEvents.has(e.event) ? 'negative' : '';
+    const label = eventLabel(e.event);
+    const min = Math.floor((e.ts||0) / 60);
+    const sec = Math.floor((e.ts||0) % 60);
+    const tstr = `${min}:${String(sec).padStart(2,'0')}`;
+    const pname = e.jersey ? `#${e.jersey} ${(e.player||'').split(' ').pop()}` : (e.player||'?').split(' ').pop();
+    return `<div class="ev-row">
+      <span class="ev-time">${tstr}</span>
+      <div class="ev-dot" style="background:${dot}"></div>
+      <span class="ev-player">${pname}</span>
+      <span class="ev-badge ${cls}">${label}</span>
+    </div>`;
+  }).join('');
+}
+
+// ── Player spotlight ──────────────────────────────────────────────────────────
+let spotlightPlayer = null;
+
+function openSpotlight(p) {
+  spotlightPlayer = p;
+  const sp = document.getElementById('spotlight');
+  sp.classList.add('open');
+
+  const teamColor = p.team==='A' ? 'var(--team-a)' : p.team==='B' ? 'var(--team-b)' : 'var(--muted)';
+  const surname = p.name ? p.name.split(' ').slice(-1)[0] : (p.jersey ? `#${p.jersey}` : `#${p.track_id}`);
+  const fullname = p.name || (p.jersey ? `#${p.jersey}` : `Player #${p.track_id}`);
+
+  document.getElementById('sp-name').textContent = fullname;
+  const badge = document.getElementById('sp-team-badge');
+  badge.textContent = p.team === 'A' ? 'Home' : p.team === 'B' ? 'Away' : '';
+  badge.style.background = p.team==='A' ? '#162040' : p.team==='B' ? '#3a1212' : 'transparent';
+  badge.style.color = teamColor;
+
+  const rc = ratClass(p.rating||6.5);
+  const ratingEl = document.getElementById('sp-rating-big');
+  ratingEl.textContent = (p.rating||6.5).toFixed(1);
+  ratingEl.className = `sp-rating ${rc}`;
+
+  document.getElementById('sp-stat-grid').innerHTML = [
+    ['Speed', `${(p.speed_ms||0).toFixed(1)} m/s`],
+    ['Top Speed', `${(p.top_speed_ms||0).toFixed(1)} m/s`],
+    ['Distance', `${(p.distance_m||0).toFixed(0)} m`],
+    ['Sprints', p.sprints||0],
+  ].map(([label, val]) => `<div class="sp-stat">
+    <div class="sp-stat-label">${label}</div>
+    <div class="sp-stat-val">${val}</div>
+  </div>`).join('');
+
+  const fc = p.fc26;
+  const fc26El = document.getElementById('sp-fc26');
+  if (fc && fc.overall) {
+    const attrs = [
+      ['OVR', fc.overall], ['PAC', fc.pace], ['SHO', fc.shooting],
+      ['PAS', fc.passing], ['DRI', fc.dribbling], ['DEF', fc.defending], ['PHY', fc.physical],
+    ].filter(([,v]) => v != null);
+    fc26El.innerHTML = `<div class="sp-fc26-title">FC26 Attributes</div>` +
+      attrs.map(([lbl, val]) => {
+        const pct = Math.min(100, val);
+        const barColor = val >= 80 ? 'var(--green)' : val >= 65 ? 'var(--yellow)' : 'var(--red)';
+        return `<div class="sp-fc26-row">
+          <span class="sp-fc26-label">${lbl}</span>
+          <div class="sp-fc26-bar-wrap"><div class="sp-fc26-bar" style="width:${pct}%;background:${barColor}"></div></div>
+          <span class="sp-fc26-val">${val}</span>
+        </div>`;
+      }).join('');
+  } else {
+    fc26El.innerHTML = '';
+  }
+
+  // Recent events from the global event log
+  const evEl = document.getElementById('sp-events');
+  const playerEvents = (lastEventLog||[]).filter(e => e.player === p.name || e.jersey === p.jersey).slice(-8);
+  if (playerEvents.length) {
+    evEl.innerHTML = `<div class="sp-fc26-title" style="padding-top:4px">Recent Events</div>` +
+      playerEvents.reverse().map(e => {
+        const min = Math.floor((e.ts||0)/60), sec = Math.floor((e.ts||0)%60);
+        const cls = positiveEvents.has(e.event)?'positive':negativeEvents.has(e.event)?'negative':'';
+        return `<div class="ev-row" style="padding:3px 0">
+          <span class="ev-time" style="min-width:30px">${min}:${String(sec).padStart(2,'0')}</span>
+          <span class="ev-badge ${cls}">${eventLabel(e.event)}</span>
+        </div>`;
+      }).join('');
+  } else {
+    evEl.innerHTML = '';
+  }
+}
+
+function closeSpotlight() {
+  document.getElementById('spotlight').classList.remove('open');
+}
+
+// ── Commentary ────────────────────────────────────────────────────────────────
+async function getCommentary() {
+  const btn = document.getElementById('get-commentary-btn');
+  btn.disabled = true; btn.textContent = 'Generating…';
+  try {
+    const resp = await fetch('/commentary', {method:'POST'});
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error||'Failed');
+    const box = document.getElementById('commentary-box');
+    box.textContent = data.commentary;
+    box.classList.add('visible');
+  } catch(err) { showToast('Commentary error: ' + err.message); }
+  btn.disabled = false; btn.textContent = '🎙 Get Live Commentary';
+}
+
+// ── Recording ─────────────────────────────────────────────────────────────────
+let isRecording = false;
+async function toggleRecording() {
+  const btn = document.getElementById('record-btn');
+  if (!isRecording) {
+    const resp = await fetch('/record/start', {method:'POST'});
+    if (resp.ok) {
+      isRecording = true;
+      btn.classList.add('recording');
+      btn.textContent = '⏹ Stop Rec';
+      showToast('Recording started');
+    }
+  } else {
+    const resp = await fetch('/record/stop', {method:'POST'});
+    const data = await resp.json();
+    isRecording = false;
+    btn.classList.remove('recording');
+    btn.textContent = '⏺ Record';
+    if (data.filename) {
+      showToast('Saved — click to download');
+      // Create a temporary download link
+      const a = document.createElement('a');
+      a.href = '/recordings/' + data.filename;
+      a.download = data.filename;
+      a.click();
+    }
+  }
 }
 
 // ── Tab switching ───────────────────────────────────────────────────────────

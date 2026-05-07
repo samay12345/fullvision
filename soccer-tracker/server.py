@@ -386,6 +386,65 @@ async def get_summary():
     return JSONResponse(summary)
 
 
+@app.post("/record/start")
+async def record_start():
+    an: Analyzer | None = pipeline_state.get("analyzer")
+    if an is None:
+        return JSONResponse({"error": "No active analysis"}, status_code=400)
+    an.start_recording()
+    return JSONResponse({"status": "recording"})
+
+
+@app.post("/record/stop")
+async def record_stop():
+    an: Analyzer | None = pipeline_state.get("analyzer")
+    if an is None:
+        return JSONResponse({"error": "No active analysis"}, status_code=400)
+    path = an.stop_recording()
+    if path:
+        fname = path.split("/")[-1]
+        return JSONResponse({"status": "saved", "filename": fname})
+    return JSONResponse({"status": "not_recording"})
+
+
+@app.get("/recordings/{filename}")
+async def get_recording(filename: str):
+    import re
+    from fastapi.responses import FileResponse
+    if not re.match(r"^match_\d{8}_\d{6}\.mp4$", filename):
+        return JSONResponse({"error": "invalid filename"}, status_code=400)
+    path = f"recordings/{filename}"
+    if not os.path.exists(path):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(path, media_type="video/mp4", filename=filename)
+
+
+@app.post("/commentary")
+async def get_commentary():
+    an: Analyzer | None = pipeline_state.get("analyzer")
+    if an is None:
+        return JSONResponse({"error": "No active analysis"}, status_code=400)
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return JSONResponse({"error": "API key not set"}, status_code=400)
+    recent_events = an._event_log[-30:]
+    if not recent_events:
+        return JSONResponse({"error": "No events yet"}, status_code=400)
+    total = max(1, sum(an._possession_frames.values()))
+    stats = {
+        "possession_a": round(100 * an._possession_frames.get("A", 0) / total),
+        "possession_b": round(100 * an._possession_frames.get("B", 0) / total),
+        "xg_a": round(an._xg_totals.get("A", 0.0), 2),
+        "xg_b": round(an._xg_totals.get("B", 0.0), 2),
+    }
+    loop = asyncio.get_event_loop()
+    try:
+        from lineup_analyzer import generate_live_commentary
+        commentary = await loop.run_in_executor(None, generate_live_commentary, recent_events, stats)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"commentary": commentary})
+
+
 @app.websocket("/ws/feed")
 async def ws_feed(ws: WebSocket):
     await ws.accept()

@@ -193,3 +193,37 @@ def generate_match_summary(player_stats: list[dict], match_info: str = "") -> di
         if m:
             return json.loads(m.group())
         raise ValueError(f"Claude returned non-JSON: {raw[:300]}")
+
+
+def generate_live_commentary(event_log: list[dict], match_stats: dict) -> str:
+    """Generate punchy live commentary from recent events."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    events_text = "\n".join(
+        f"  {e.get('ts', 0):.0f}s — {e.get('player', '?')} ({e.get('team','?')}): {e.get('event','?')}"
+        for e in event_log[-20:]
+    )
+    poss_a = match_stats.get("possession_a", 50)
+    poss_b = match_stats.get("possession_b", 50)
+
+    msg = client.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=200,
+        messages=[{
+            "role": "user",
+            "content": (
+                "You are a live soccer TV commentator. Write exactly 2-3 punchy, "
+                "exciting sentences of live commentary based on these recent events. "
+                "Reference specific player names and actions. Be energetic — like real TV.\n\n"
+                f"Recent events:\n{events_text}\n\n"
+                f"Possession: Team A {poss_a}%, Team B {poss_b}%  "
+                f"xG: A={match_stats.get('xg_a',0):.2f} B={match_stats.get('xg_b',0):.2f}\n\n"
+                "Return ONLY the commentary text, no labels, no JSON."
+            ),
+        }],
+    )
+    return msg.content[0].text.strip()
